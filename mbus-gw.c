@@ -13,6 +13,8 @@
 #include <pthread.h>
 #include <time.h>
 
+/* Slave address (1-255 for RTU/ASCII, 0-255 for TCP) */
+
 #define CHILD_NUM       4
 #define BUF_SIZE        512
 #define MAX_EVENTS      1024
@@ -64,6 +66,8 @@ struct queue_list *queue_from_slaveid(int slave_id)
             break;
         if (rtu[i].slave_id == slave_id) {
             q = rtu[i].q;
+            if (!q)
+                q = rtu[i].q = calloc(1, sizeof(struct queue_list));
             break;
         }
     }
@@ -80,16 +84,14 @@ int queue_add(struct queue_list *que, int fd, u_int8_t *buf, size_t len)
         return -1;
 
     pthread_rwlock_wrlock(&rwlock);
-    if (!q) {
-        que = q = malloc(sizeof(struct queue_list));
-    } else {
-        while (q->next != NULL)
-            q = q->next;
-        q->next = malloc(sizeof(struct queue_list));
+    while (q->next != NULL)
         q = q->next;
-    }
+    q->next = malloc(sizeof(struct queue_list));
+    q = q->next;
+    q->next = NULL;
     q->resp_fd = fd;
-    q->buf = buf;
+    q->buf = malloc(len);
+    memcpy(q->buf, buf, len);
     q->len = len;
     pthread_rwlock_unlock(&rwlock);
 
@@ -125,7 +127,9 @@ void *rtu_thread(void *arg)
 
     /* Load RTU config */
     ev.events = EPOLLIN | EPOLLERR;
-    ev.data.fd = 0;
+    ev.data.fd = dup(0);
+    rtu[0].slave_id=0;
+    rtu[0].fd = ev.data.fd;
     if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
         perror("epoll_ctl(0) failed");
         return NULL;
@@ -162,6 +166,7 @@ void *rtu_thread(void *arg)
         /* Process QUEUE */
         pthread_rwlock_wrlock(&rwlock);
         for (n = 0; n < MAX_RTU_EVENTS; ++n) {
+            int i = 0;
             if (!rtu[n].fd)
                 break;
 
@@ -182,7 +187,9 @@ void *rtu_thread(void *arg)
     //            is_top = 0;
 
                 q = q->next;
+                i++;
             }
+//            printf("slave_id=%d queue=%d\n", rtu[n].slave_id, i);
         }
         pthread_rwlock_unlock(&rwlock);
 
@@ -233,7 +240,7 @@ c_close:
                 int sz = sizeof(ans);
                 send(evs[n].data.fd, ans, sz, 0);
 
-//                queue_add(queue_from_slaveid(buf[6]), evs[n].data.fd, buf, len);
+                printf("%d\n", queue_add(queue_from_slaveid(0 /* buf[6] */), evs[n].data.fd, buf, len));
 
                 // fprintf(stderr, "%d Read %d bytes from %d\n", self->n, len, evs[n].data.fd);
                 goto c_close;
@@ -254,12 +261,12 @@ int main(int argc, char **argv)
     int sd;
     int ep;
     int cur_child = 0;
-    pthread_t rtu;
+    pthread_t rtu_proc;
     pthread_attr_t attr;
     struct sockaddr_in6 sin6;
     struct epoll_event ev;
     struct epoll_event evs[1];
-    static struct childs childs[CHILD_NUM];
+    static struct childs childs[CHILD_NUM+1];
 
     if ((sd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
         perror("socket() failed");
@@ -317,12 +324,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    memset(&rtu, 0, sizeof(struct rtu_desc)*MAX_RTU_EVENTS);
+
     /* Pre-fork threads */
     pthread_rwlock_init(&rwlock, NULL);
 
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&rtu, &attr, rtu_thread, NULL) < 0) {
+    if (pthread_create(&rtu_proc, &attr, rtu_thread, NULL) < 0) {
         perror("pthread_create() failed");
         return 2;
     }
