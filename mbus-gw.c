@@ -13,12 +13,13 @@
 #include <pthread.h>
 #include <time.h>
 
+#include "vect.h"
+
 /* Slave address (1-255 for RTU/ASCII, 0-255 for TCP) */
 
 #define CHILD_NUM       4
 #define BUF_SIZE        512
 #define MAX_EVENTS      1024
-#define MAX_RTU_EVENTS  128
 #define MODBUS_TCP_PORT 502
 #define RTU_TIMEOUT     3
 #define CACHE_TTL       3
@@ -34,6 +35,12 @@
     }                               \
     n = e->next;                    \
     free(e)
+
+enum rtu_type {
+    ASCII,
+    RTU,
+    TCP,
+};
 
 struct cache_page {
     int status;         /* 0 - ok, 1 - timeout, 2 - NA */
@@ -56,9 +63,15 @@ struct queue_list {
     struct queue_list *prev;
 };
 
+struct slave_map {
+    int src;
+    int dst;
+};
+
 struct rtu_desc {
     int fd;               /* ttySx descriptior */
-    int slave_id;         /* slave_id configured for MODBUS-TCP */
+    enum rtu_type type;   /* endpoint RTU device type */
+    VECT(struct slave_map) slave_id;   /* slave_id configured for MODBUS-TCP */
     struct queue_list *q; /* queue list */
     struct cache_page *p; /* cache pages */
 };
@@ -69,23 +82,26 @@ struct childs {
     pthread_t th;
 };
 
-static struct rtu_desc rtu[MAX_RTU_EVENTS];
+static VECT(struct rtu_desc) rtu;
 static pthread_rwlock_t rwlock;
 
 struct rtu_desc *rtu_by_slaveid(int slave_id)
 {
-    int i;
+    struct slave_map *mi;
+    struct rtu_desc *ri;
     struct rtu_desc *r = NULL;
 
     pthread_rwlock_rdlock(&rwlock);
-    for (i = 0; i < MAX_RTU_EVENTS; ++i) {
-        if (!rtu[i].fd)
-            break;
-        if (rtu[i].slave_id == slave_id) {
-            r = &rtu[i];
-            break;
+    VFOREACH(rtu, ri) {
+        VFOREACH(ri->slave_id, mi) {
+            if (mi->src == slave_id) {
+                r = ri;
+                goto out;
+            }
         }
     }
+
+out:
     pthread_rwlock_unlock(&rwlock);
 
     return r;
@@ -97,11 +113,9 @@ struct rtu_desc *rtu_by_fd(int fd)
     struct rtu_desc *r = NULL;
 
     pthread_rwlock_rdlock(&rwlock);
-    for (i = 0; i < MAX_RTU_EVENTS; ++i) {
-        if (!rtu[i].fd)
-            break;
-        if (rtu[i].fd == fd) {
-            r = &rtu[i];
+    VFORI(rtu, i) {
+        if (VGET(rtu, i).fd == fd) {
+            r = &VGET(rtu, i);
             break;
         }
     }
@@ -252,23 +266,38 @@ int setnonblocking(int sockfd)
 void *rtu_thread(void *arg)
 {
     int ep;
+    struct rtu_desc r;
+    struct slave_map m;
     struct cache_page *p;
     struct queue_list *q;
     u_int8_t buf[BUF_SIZE];
     struct epoll_event ev;
-    struct epoll_event evs[MAX_RTU_EVENTS];
+    struct epoll_event *evs;
 
-    ep = epoll_create(MAX_RTU_EVENTS);
+    /* TODO: Read config first */
+    VINIT(rtu);
+
+    /* :HACK: */ 
+    r.fd = dup(0);
+    m.src = 1;
+    m.dst = 1;
+    VINIT(r.slave_id);
+    VADD(r.slave_id, m);
+    VADD(rtu, r);
+    /* :HACK: */
+
+    ep = epoll_create(VLEN(rtu));
     if (ep == -1) {
         perror("epoll_create() failed");
         return NULL;
     }
 
-    /* Load RTU config */
+    evs = malloc(sizeof(struct epoll_event) * VLEN(rtu));
+
+    /* TODO: Proceed to open all RTU */
     ev.events = EPOLLIN | EPOLLERR;
-    ev.data.fd = dup(0);
-    rtu[0].slave_id = 1;
-    rtu[0].fd = ev.data.fd;
+    ev.data.fd = VGET(rtu, 0).fd;
+
     if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
         perror("epoll_ctl(0) failed");
         return NULL;
@@ -277,7 +306,7 @@ void *rtu_thread(void *arg)
     for (;;) {
         int n;
         time_t cur_time;
-        int nfds = epoll_wait(ep, evs, MAX_RTU_EVENTS, 500);
+        int nfds = epoll_wait(ep, evs, VLEN(rtu), 500);
         if (nfds == -1) {
             if (errno == EINTR)
                 continue;
@@ -313,28 +342,28 @@ void *rtu_thread(void *arg)
 
         pthread_rwlock_wrlock(&rwlock);
         cur_time = time(NULL);
-        for (n = 0; n < MAX_RTU_EVENTS; ++n) {
-            if (!rtu[n].fd)
+        VFORI(rtu, n) {
+            if (!VGET(rtu, n).fd)
                 break;
 
             /* Invalidate cache pages */
-            p = rtu[n].p;
+            p = VGET(rtu, n).p;
             while (p) {
                 if (p->ttd && p->ttd <= cur_time) {
-                    p = _page_free(&rtu[n], p);
+                    p = _page_free(&VGET(rtu, n), p);
                     continue;
                 }
                 p = p->next;
             }
 
             /* Process queue */
-            q = rtu[n].q;
+            q = VGET(rtu, n).q;
             while (q) {
                 /* Check for timeouted items */
                 if (q->stamp && q->stamp <= cur_time) {
                     // build response with error message
-                    send(q->resp_fd, "\x00\x01\x00", 3, 0);
-                    q = _queue_free(&rtu[n], q);
+                    write(q->resp_fd, "\x00\x01\x00", 3);
+                    q = _queue_free(&VGET(rtu, n), q);
                     continue;
                 } else if (q->stamp) {
                     break;
@@ -344,12 +373,12 @@ void *rtu_thread(void *arg)
 
                     /* Check for cache page or process new request */
                     if (found) {
-                        send(q->resp_fd, "\x00\x01\x00", 3, 0);
-                        q = _queue_free(&rtu[n], q);
+                        write(q->resp_fd, "\x00\x01\x00", 3);
+                        q = _queue_free(&VGET(rtu ,n), q);
                         continue;
                     }
 
-                    if (write(rtu[n].fd, q->buf, q->len) != q->len) {
+                    if (write(VGET(rtu, n).fd, q->buf, q->len) != q->len) {
                         perror("write() failed");
                     }
 
@@ -357,7 +386,7 @@ void *rtu_thread(void *arg)
                     break;
                 }
             }
-//            printf("slave_id=%d queue=%d\n", rtu[n].slave_id, i);
+//            printf("slave_id=%d queue=%d\n", VGET(rtu, n).slave_id, i);
         }
         pthread_rwlock_unlock(&rwlock);
     }
@@ -394,7 +423,7 @@ void *tcp_thread(void *p)
             if (!(evs[n].events & EPOLLIN))
                 continue;
 
-            len = recv(evs[n].data.fd, buf, BUF_SIZE, 0);
+            len = read(evs[n].data.fd, buf, BUF_SIZE);
             if (len == 0) {
 c_close:
                 epoll_ctl(self->ep, EPOLL_CTL_DEL, evs[n].data.fd, NULL);
@@ -404,7 +433,7 @@ c_close:
             } else {
                 char ans[] = "HTTP/1.1 200 OK\r\nServer: fake/1.0\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>OK</html>\r\n";
                 int sz = sizeof(ans);
-                send(evs[n].data.fd, ans, sz, 0);
+                write(evs[n].data.fd, ans, sz);
 
                 queue_add(rtu_by_slaveid(1 /* buf[6] */), evs[n].data.fd, buf, len);
 
@@ -489,8 +518,6 @@ int main(int argc, char **argv)
         perror("epoll_ctl(sd) failed");
         return 1;
     }
-
-    memset(&rtu, 0, sizeof(struct rtu_desc)*MAX_RTU_EVENTS);
 
     /* Pre-fork threads */
     pthread_rwlock_init(&rwlock, NULL);
