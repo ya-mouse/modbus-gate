@@ -10,6 +10,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
+#include <netinet/ip.h>
+#include <netinet/in.h>
+#include <netdb.h>
 #include <pthread.h>
 #include <time.h>
 
@@ -43,7 +47,7 @@ enum rtu_type {
 };
 
 struct cache_page {
-    u_int8_t status;                    /* 0 - ok, 1 - timeout, 2 - NA */
+    u_int8_t status;        /* 0 - ok, 1 - timeout, 2 - NA */
     u_int8_t slaveid;
     u_int16_t addr;
     u_int16_t function;
@@ -55,10 +59,10 @@ struct cache_page {
 };
 
 struct queue_list {
-    int resp_fd;    /* "response to" descriptor */
-    u_int8_t *buf;  /* request buffer */
-    size_t len;     /* request length */
-    time_t stamp;   /* timestamp of timeout: last_timestamp + timeout */
+    int resp_fd;            /* "response to" descriptor */
+    u_int8_t *buf;          /* request buffer */
+    size_t len;             /* request length */
+    time_t stamp;           /* timestamp of timeout: last_timestamp + timeout */
 };
 
 typedef QUEUE(struct queue_list) queue_list_v;
@@ -73,6 +77,15 @@ typedef VECT(struct slave_map) slave_map_v;
 struct rtu_desc {
     int fd;                 /* ttySx descriptior */
     enum rtu_type type;     /* endpoint RTU device type */
+    union {
+        char *hostname;     /* MODBUS-TCP hostname */
+        struct {
+            char *devname;  /* serial device name */
+            int baudrate;   /* device baudrate */
+            int parity;
+            int bits;
+        } serial;
+    } cfg;
     slave_map_v slave_id;   /* slave_id configured for MODBUS-TCP */
     queue_list_v q;         /* queue list */
     struct cache_page *p;   /* cache pages */
@@ -126,24 +139,28 @@ out:
     return ri;
 }
 
-void cache_update(struct rtu_desc *rtu, u_int8_t *buf, size_t len)
+void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
 {
-    int slave = -1;
-    int nb = 0;
-    int addr = -1;
+    int slave;
+    int addr;
+    int nb;
+    struct queue_list *q;
     struct cache_page *p;
     struct cache_page *new;
 
-    if (!rtu || !rtu->p)
+    if (!rtu || !rtu->p || !QLEN(rtu->q))
         return;
 
     pthread_rwlock_wrlock(&rwlock);
     /* Check for function type */
     // ...
 
-    slave = 1; // rtu->q->buf[6];
-    addr = 0; //rtu->q->buf[8] >> 8 | rtu->q->buf[9];
-    nb = 4; // rtu->q->buf[10] >> 8 | rtu->q->buf[11];
+    /* TODO: Write (change register) request shouldn't be cached */
+
+    q = &QGET(rtu->q, 0);
+    slave = 1; // q->buf[6];
+    addr = 0; //q->buf[8] >> 8 | q->buf[9];
+    nb = 4; // q->buf[10] >> 8 | q->buf[11];
 
     if (!rtu->p) {
 //        printf("new cache: ");
@@ -200,7 +217,7 @@ struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
 {
     struct cache_page *next;
 
-    if (!p)
+    if (!rtu || !p)
         return NULL;
 
 //    printf("free: %p ", p);
@@ -210,7 +227,32 @@ struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
     return next;
 }
 
-int queue_add(int slave_id, int fd, u_int8_t *buf, size_t len)
+struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
+{
+    int slave;
+    int addr;
+    int nb;
+    struct cache_page *p;
+
+    if (!rtu)
+        return NULL;
+
+    /* TODO: Write (change register) request shouldn't be cached */
+
+    p = rtu->p;
+    slave = 1; // q->buf[6];
+    addr = 0; //q->buf[8] >> 8 | q->buf[9];
+    nb = 4; // q->buf[10] >> 8 | q->buf[11];
+    while (p) {
+        if (addr == p->addr && slave == p->slaveid && nb == p->len)
+            return p;
+        p = p->next;
+    }
+
+    return p;
+}
+
+int queue_add(int slave_id, int fd, const u_int8_t *buf, size_t len)
 {
     struct slave_map *mi;
     struct rtu_desc *ri;
@@ -269,6 +311,81 @@ int setnonblocking(int sockfd)
     return 0;
 }
 
+int rtu_open_serial(struct rtu_desc *rtu)
+{
+    /* TODO: setup baud rate, bits and parity */
+    return open(rtu->cfg.serial.devname, O_RDWR | O_NONBLOCK);
+}
+
+int rtu_open_tcp(struct rtu_desc *rtu)
+{
+    struct addrinfo hints;
+    struct addrinfo *result, *rp;
+    char service[NI_MAXSERV];
+
+    sprintf(service, "%d", 502);
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC; /* Allow IPv4 or IPv6 */
+    hints.ai_socktype = SOCK_STREAM; /* Datagram socket */
+    hints.ai_flags = AI_NUMERICSERV;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    if (getaddrinfo(rtu->cfg.hostname, service, &hints, &result) != 0) {
+        return -1;
+    }
+
+    rtu->fd = -1;
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        int s;
+
+        s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (s < 0)
+            continue;
+ 
+        if (rp->ai_family == AF_INET) {
+            int opt = 1;
+            /* Set the TCP no delay flag */
+            if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
+                           (const void *)&opt, sizeof(int)) == -1) {
+                close(s);
+                continue;
+            }
+
+            opt = IPTOS_LOWDELAY;
+            if (setsockopt(s, IPPROTO_IP, IP_TOS,
+                           (const void *)&opt, sizeof(int)) == -1) {
+                close(s);
+                continue;
+            }
+
+            if (connect(s, rp->ai_addr, rp->ai_addrlen) != 0) {
+                close(s);
+                continue;
+            }
+
+            rtu->fd = s;
+            break;
+        }
+    }
+    freeaddrinfo(result);
+
+    return rtu->fd;
+}
+
+int rtu_open(struct rtu_desc *rtu)
+{
+    switch (rtu->type) {
+    case RTU:
+    case ASCII:
+        return rtu_open_serial(rtu);
+    
+    case TCP:
+        return rtu_open_tcp(rtu);
+    }
+
+    return -1;
+}
+
 void *rtu_thread(void *arg)
 {
     int ep;
@@ -285,10 +402,11 @@ void *rtu_thread(void *arg)
     /* TODO: Read config first */
     VINIT(rtu_list);
 
-    /* :HACK: */ 
+    /* :HACK: */
     m.src = 1;
-    m.dst = 1;
-    r.type = RTU;
+    m.dst = 247;
+    r.type = TCP;
+    r.cfg.hostname = strdup("37.140.168.193");
     VINIT(r.slave_id);
     QINIT(r.q);
     VADD(r.slave_id, m);
@@ -305,13 +423,25 @@ void *rtu_thread(void *arg)
 
     /* TODO: Proceed to open all RTU */
     VFOREACH(rtu_list, ri) {
-        ri->fd = dup(0);
+        ev.data.fd = rtu_open(ri);
         ev.events = EPOLLIN | EPOLLERR;
-        ev.data.fd = ri->fd;
+
+        if (ev.data.fd < 0) {
+            switch (ri->type) {
+            case RTU:
+            case ASCII:
+                printf("Unable to open %s (%d)\n", ri->cfg.serial.devname, errno);
+                break;
+
+            case TCP:
+                printf("Unable to connect to %s (%d)\n", ri->cfg.hostname, errno);
+                break;
+            }
+            continue;
+        }
 
         if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
             perror("epoll_ctl(0) failed");
-            return NULL;
         }
     }
 
@@ -338,12 +468,23 @@ void *rtu_thread(void *arg)
             if (!ri) {
                 /* Should never happens, just clear the event */
                 len = read(evs[n].data.fd, buf, BUF_SIZE);
+                close(evs[n].data.fd);
                 continue;
             }
 
             len = read(evs[n].data.fd, buf, BUF_SIZE);
             if (len <= 0) {
                 /* Re-open required */
+                close(evs[n].data.fd);
+                ev.data.fd = rtu_open(ri);
+                ev.events = EPOLLIN | EPOLLERR;
+                if (evs[n].data.fd < 0) {
+                    perror("rtu_open(ri) failed. disabling for a while\n");
+                    ri->fd = -1;
+                } else if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
+                    perror("epoll_ctl(re-open) failed");
+                }
+                fprintf(stderr, "Read failed, trying to re-open %d\n", ri->fd);
                 continue;
             }
 
@@ -354,8 +495,20 @@ void *rtu_thread(void *arg)
         pthread_rwlock_wrlock(&rwlock);
         cur_time = time(NULL);
         VFOREACH(rtu_list, ri) {
-            if (!ri->fd)
-                break;
+            if (!ri->fd) {
+                /* TODO: handle failed RTUs (number of attemps) and 
+                 *       answer to query for failed RTUs
+                 */
+                ev.data.fd = rtu_open(ri);
+                ev.events = EPOLLIN | EPOLLERR;
+                if (ev.data.fd < 0)
+                    continue;
+
+                if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
+                    perror("epoll_ctl(0) failed");
+                }
+                continue;
+            }
 
             /* Invalidate cache pages */
             p = ri->p;
@@ -381,17 +534,16 @@ void *rtu_thread(void *arg)
                 } else if (q->stamp) {
                     break;
                 } else {
-                    int found = 0;
-                    /* Write (change) request shouldn't be cached */
-
-                    /* Check for cache page or process new request */
-                    if (found) {
-                        write(q->resp_fd, "\x00\x01\x00", 3);
+                    /* Check for cache page */
+                    p = _cache_find(ri, q);
+                    if (p) {
+                        write(q->resp_fd, p->buf, p->len);
                         _queue_pop(ri);
                         n--;
                         continue;
                     }
 
+                    /* Make request to RTU */
                     if (write(ri->fd, q->buf, q->len) != q->len) {
                         perror("write() failed");
                     }
