@@ -59,8 +59,6 @@ struct queue_list {
     u_int8_t *buf;  /* request buffer */
     size_t len;     /* request length */
     time_t stamp;   /* timestamp of timeout: last_timestamp + timeout */
-    struct queue_list *next;
-    struct queue_list *prev;
 };
 
 typedef QUEUE(struct queue_list) queue_list_v;
@@ -88,7 +86,7 @@ struct childs {
     pthread_t th;
 };
 
-static rtu_desc_v rtu;
+static rtu_desc_v rtu_list;
 static pthread_rwlock_t rwlock;
 
 struct rtu_desc *rtu_by_slaveid(int slave_id)
@@ -97,7 +95,7 @@ struct rtu_desc *rtu_by_slaveid(int slave_id)
     struct rtu_desc *ri;
 
     pthread_rwlock_rdlock(&rwlock);
-    VFOREACH(rtu, ri) {
+    VFOREACH(rtu_list, ri) {
         VFOREACH(ri->slave_id, mi) {
             if (mi->src == slave_id)
                 goto out;
@@ -116,7 +114,7 @@ struct rtu_desc *rtu_by_fd(int fd)
     struct rtu_desc *ri;
 
     pthread_rwlock_rdlock(&rwlock);
-    VFOREACH(rtu, ri) {
+    VFOREACH(rtu_list, ri) {
         if (ri->fd == fd)
             goto out;
     }
@@ -212,22 +210,33 @@ struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
     return next;
 }
 
-int queue_add(struct rtu_desc *rtu, int fd, u_int8_t *buf, size_t len)
+int queue_add(int slave_id, int fd, u_int8_t *buf, size_t len)
 {
+    struct slave_map *mi;
+    struct rtu_desc *ri;
     struct queue_list q;
-
-    if (!rtu)
-        return -1;
 
     pthread_rwlock_wrlock(&rwlock);
 
+    VFOREACH(rtu_list, ri) {
+        VFOREACH(ri->slave_id, mi) {
+            if (mi->src == slave_id)
+                goto found;
+        }
+    }
+
+    pthread_rwlock_unlock(&rwlock);
+    return -2;
+
+found:
     q.stamp = 0;
     q.resp_fd = fd;
     q.buf = malloc(len);
     q.len = len;
+    /* TODO: fixup slave_id address */
     memcpy(q.buf, buf, len);
 
-    QADD(rtu->q, q);
+    QADD(ri->q, q);
 
     pthread_rwlock_unlock(&rwlock);
 
@@ -274,39 +283,42 @@ void *rtu_thread(void *arg)
     struct epoll_event *evs;
 
     /* TODO: Read config first */
-    VINIT(rtu);
+    VINIT(rtu_list);
 
     /* :HACK: */ 
-    r.fd = dup(0);
     m.src = 1;
     m.dst = 1;
+    r.type = RTU;
     VINIT(r.slave_id);
     QINIT(r.q);
     VADD(r.slave_id, m);
-    VADD(rtu, r);
+    VADD(rtu_list, r);
     /* :HACK: */
 
-    ep = epoll_create(VLEN(rtu));
+    ep = epoll_create(VLEN(rtu_list));
     if (ep == -1) {
         perror("epoll_create() failed");
         return NULL;
     }
 
-    evs = malloc(sizeof(struct epoll_event) * VLEN(rtu));
+    evs = malloc(sizeof(struct epoll_event) * VLEN(rtu_list));
 
     /* TODO: Proceed to open all RTU */
-    ev.events = EPOLLIN | EPOLLERR;
-    ev.data.fd = VGET(rtu, 0).fd;
+    VFOREACH(rtu_list, ri) {
+        ri->fd = dup(0);
+        ev.events = EPOLLIN | EPOLLERR;
+        ev.data.fd = ri->fd;
 
-    if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
-        perror("epoll_ctl(0) failed");
-        return NULL;
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
+            perror("epoll_ctl(0) failed");
+            return NULL;
+        }
     }
 
     for (;;) {
         int n;
         time_t cur_time;
-        int nfds = epoll_wait(ep, evs, VLEN(rtu), 500);
+        int nfds = epoll_wait(ep, evs, VLEN(rtu_list), 500);
         if (nfds == -1) {
             if (errno == EINTR)
                 continue;
@@ -317,14 +329,13 @@ void *rtu_thread(void *arg)
         /* Process RTU data */
         for (n = 0; n < nfds; ++n) {
             int len;
-            struct rtu_desc *rtu;
 
             if (!(evs[n].events & EPOLLIN))
                 continue;
 
             /* Get RTU by descriptor */
-            rtu = rtu_by_fd(evs[n].data.fd);
-            if (!rtu) {
+            ri = rtu_by_fd(evs[n].data.fd);
+            if (!ri) {
                 /* Should never happens, just clear the event */
                 len = read(evs[n].data.fd, buf, BUF_SIZE);
                 continue;
@@ -337,12 +348,12 @@ void *rtu_thread(void *arg)
             }
 
             /* Update cache */
-            cache_update(rtu, buf, len);
+            cache_update(ri, buf, len);
         }
 
         pthread_rwlock_wrlock(&rwlock);
         cur_time = time(NULL);
-        VFOREACH(rtu, ri) {
+        VFOREACH(rtu_list, ri) {
             if (!ri->fd)
                 break;
 
@@ -438,7 +449,7 @@ c_close:
                 int sz = sizeof(ans);
                 write(evs[n].data.fd, ans, sz);
 
-                queue_add(rtu_by_slaveid(1 /* buf[6] */), evs[n].data.fd, buf, len);
+                queue_add(1 /* buf[6] */, evs[n].data.fd, buf, len);
 
                 // fprintf(stderr, "%d Read %d bytes from %d\n", self->n, len, evs[n].data.fd);
                 goto c_close;
