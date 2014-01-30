@@ -18,7 +18,7 @@
 #define BUF_SIZE        512
 #define MAX_EVENTS      1024
 #define MODBUS_TCP_PORT 502
-#define RTU_TIMEOUT     1
+#define RTU_TIMEOUT     3
 #define CACHE_TTL       3
 
 enum rtu_type {
@@ -59,6 +59,9 @@ typedef VECT(struct slave_map) slave_map_v;
 struct rtu_desc {
     int fd;                 /* ttySx descriptior */
     enum rtu_type type;     /* endpoint RTU device type */
+    slave_map_v slave_id;   /* slave_id configured for MODBUS-TCP */
+    u_int16_t tid;
+    u_int8_t tido[2];
     union {
         struct {
             char *hostname;     /* MODBUS-TCP hostname */
@@ -78,7 +81,6 @@ struct rtu_desc {
             struct termio t;
         } serial;
     } cfg;
-    slave_map_v slave_id;   /* slave_id configured for MODBUS-TCP */
     queue_list_v q;         /* queue list */
     struct cache_page *p;   /* cache pages */
 };

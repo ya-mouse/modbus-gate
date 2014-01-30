@@ -101,6 +101,13 @@ void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
            slave, addr, nb, buf[6], buf[8] >> 1);
 #endif
 
+    /* TODO: Check for Query TID and Response TID */
+    if (q->buf[0] != buf[0] || q->buf[1] != buf[1]) {
+        DEBUGF(">>> Wrong ordered response: %d expected %d\n",
+               (buf[0] << 8) | buf[1], (q->buf[0] << 8) | q->buf[1]);
+        return;
+    }
+
     /* For error response do not cache the answer, just write it back */
 //    if (buf[7] & 0x80)
 
@@ -456,6 +463,7 @@ void *rtu_thread(void *arg)
     /* :HACK: */
     m.src = 2;
     m.dst = 1;
+    r.tid = 1;
     r.type = TCP;
     r.cfg.tcp.port = 502;
     r.cfg.tcp.hostname = strdup("84.201.130.34");
@@ -564,7 +572,7 @@ void *rtu_thread(void *arg)
                 if (q->stamp && q->stamp <= cur_time) {
                     // build response with TIMEOUT error message
                     DEBUGF("Remove from queue: %d\n", q->buf[6]);
-                    write(q->resp_fd, "\x00\x01\x00", 3);
+                    write(q->resp_fd, "\x00\x01\x00\x00\x00\x02\x01\x83", 8);
                     _queue_pop(ri);
                     n--;
                     continue;
@@ -572,7 +580,13 @@ void *rtu_thread(void *arg)
                     /* Check for cache page */
                     p = _cache_find(ri, q);
                     if (p) {
-                        DEBUGF("Found, responsd to %d len=%d\n", q->resp_fd, p->len);
+                        DEBUGF("Found, respond to %d len=%d\n",
+                               q->resp_fd, p->len);
+#if 1
+                        /* Revert TID back */
+                        p->buf[0] = ri->tido[0];
+                        p->buf[1] = ri->tido[1];
+#endif
                         write(q->resp_fd, p->buf, p->len);
                         _queue_pop(ri);
                         n--;
@@ -581,6 +595,17 @@ void *rtu_thread(void *arg)
                         break;
                     }
 
+#if 1
+                    /* Fixup TID */
+                    ri->tido[0] = q->buf[0];
+                    ri->tido[1] = q->buf[1];
+                    q->buf[0] = ri->tid >> 8;
+                    q->buf[1] = ri->tid & 0xff;
+                    ri->tid++;
+                    /* Zero is not allowed as TID */
+                    if (!ri->tid)
+                        ri->tid++;
+#endif
                     /* Make request to RTU */
                     if (write(ri->fd, q->buf, q->len) != q->len) {
                         perror("write() failed");
