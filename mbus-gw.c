@@ -21,24 +21,20 @@
 
 /* Slave address (1-255 for RTU/ASCII, 0-255 for TCP) */
 
+//#undef DEBUG
+#define DEBUG
+#ifdef DEBUG
+#define DEBUGF(x...) printf(x)
+#else
+#define DEBUGF(x...) do { } while(0);
+#endif
+
 #define CHILD_NUM       4
 #define BUF_SIZE        512
 #define MAX_EVENTS      1024
 #define MODBUS_TCP_PORT 502
 #define RTU_TIMEOUT     1
 #define CACHE_TTL       3
-
-#define DBL_FREE(e,n)               \
-    free(e->buf);                   \
-    if (!e->prev) {                 \
-        rtu->e = e->next;           \
-        if (rtu->e)                 \
-            rtu->e->prev = NULL;    \
-    } else {                        \
-        e->prev->next = e->next;    \
-    }                               \
-    n = e->next;                    \
-    free(e)
 
 enum rtu_type {
     ASCII,
@@ -142,25 +138,45 @@ out:
 void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
 {
     int slave;
+    int func;
     int addr;
     int nb;
+    int i;
     struct queue_list *q;
     struct cache_page *p;
     struct cache_page *new;
 
-    if (!rtu || !rtu->p || !QLEN(rtu->q))
+    if (!rtu || !QLEN(rtu->q))
         return;
 
     pthread_rwlock_wrlock(&rwlock);
+    /* TODO: Write (change register) request shouldn't be cached */
     /* Check for function type */
     // ...
 
-    /* TODO: Write (change register) request shouldn't be cached */
-
     q = &QGET(rtu->q, 0);
-    slave = 1; // q->buf[6];
-    addr = 0; //q->buf[8] >> 8 | q->buf[9];
-    nb = 4; // q->buf[10] >> 8 | q->buf[11];
+    /* TODO: handle different RTU types */
+    slave = q->buf[6];
+    func = q->buf[7];
+    addr = (q->buf[8] << 8) | q->buf[9];
+    nb = (q->buf[10] << 8) | q->buf[11];
+
+#ifdef DEBUG
+    printf("-- ");
+    for (i=0; i<q->len; i++) {
+        printf("%02x ", q->buf[i]);
+    }
+    printf("\n++ ");
+    for (i=0; i<len; i++) {
+        printf("%02x ", buf[i]);
+    }
+    printf("\n");
+
+    printf("update sid=%d addr=%d nb=%d for %d %d\n", slave, addr, nb, buf[6], buf[8] >> 1);
+#endif
+
+    /* For error response do not cache the answer, just write it back */
+//    if (buf[7] & 0x80)
 
     if (!rtu->p) {
 //        printf("new cache: ");
@@ -170,10 +186,10 @@ void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
     } else {
         p = rtu->p;
         while (p->next != NULL) {
-            if (addr == p->addr && slave == p->slaveid) {
+            if (func == p->function && slave == p->slaveid && addr == p->addr) {
                 /* Update page if it has the same constraints */
 //                printf("update %p (%d,%d)\n", p, nb, p->len);
-                if (nb == p->len)
+                if (nb == ((buf[10] << 8) | buf[11])) //p->len)
                     goto update;
                 break;
             } else if (addr > p->addr) {
@@ -197,23 +213,24 @@ void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
         p->next = new;
         new->prev = p;
         p = new;
-//        printf("alloc %p n=%p p=%p\n", p, new->next, new->prev);
     }
+    DEBUGF("alloc %p n=%p p=%p\n", p, p->next, p->prev);
 
 fill:
-    p->addr = addr;
+    p->function = func;
     p->slaveid = slave;
+    p->addr = addr;
     p->buf = malloc(len);
     p->len = len;
 
 update:
     memcpy(p->buf, buf, len);
-    /* TODO: TTL have to be configured for each RTU / slave */
+    /* TODO: TTL have to be configured via config for each RTU / slave */
     p->ttd = time(NULL) + CACHE_TTL;
     pthread_rwlock_unlock(&rwlock);
 }
 
-struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
+inline struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
 {
     struct cache_page *next;
 
@@ -221,7 +238,16 @@ struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
         return NULL;
 
 //    printf("free: %p ", p);
-    DBL_FREE(p, next);
+    free(p->buf);
+    if (!p->prev) {
+        rtu->p = p->next;
+        if (rtu->p)
+            rtu->p->prev = NULL;
+    } else {
+        p->prev->next = p->next;
+    }
+    next = p->next;
+    free(p);
 
 //    printf(" n=%p\n", next);
     return next;
@@ -231,6 +257,7 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
 {
     int slave;
     int addr;
+    int func;
     int nb;
     struct cache_page *p;
 
@@ -240,11 +267,16 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
     /* TODO: Write (change register) request shouldn't be cached */
 
     p = rtu->p;
-    slave = 1; // q->buf[6];
-    addr = 0; //q->buf[8] >> 8 | q->buf[9];
-    nb = 4; // q->buf[10] >> 8 | q->buf[11];
+    slave = q->buf[6];
+    func = q->buf[7];
+    addr = (q->buf[8] << 8) | q->buf[9];
+    nb = (q->buf[10] << 8) | q->buf[11];
+
+    DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
+
     while (p) {
-        if (addr == p->addr && slave == p->slaveid && nb == p->len)
+        DEBUGF("--> (%d,%d,%d) <> (%d,%d,%d)\n", func, slave, addr, p->function, p->slaveid, p->addr);
+        if (func == p->function && slave == p->slaveid && addr == p->addr)
             return p;
         p = p->next;
     }
@@ -271,12 +303,16 @@ int queue_add(int slave_id, int fd, const u_int8_t *buf, size_t len)
     return -2;
 
 found:
+    DEBUGF("Adding sid=%d to queue len=%d\n", slave_id, len);
+
     q.stamp = 0;
     q.resp_fd = fd;
     q.buf = malloc(len);
     q.len = len;
-    /* TODO: fixup slave_id address */
     memcpy(q.buf, buf, len);
+
+    /* Fixup destination slave address */
+    q.buf[6] = mi->dst;
 
     QADD(ri->q, q);
 
@@ -285,7 +321,7 @@ found:
     return 0;
 }
 
-void _queue_pop(struct rtu_desc *rtu)
+inline void _queue_pop(struct rtu_desc *rtu)
 {
     struct queue_list *q;
 
@@ -293,7 +329,6 @@ void _queue_pop(struct rtu_desc *rtu)
         return;
 
     q = &QREMOVE(rtu->q);
-    close(q->resp_fd);
     free(q->buf);
     q->buf = NULL;
 }
@@ -432,16 +467,16 @@ void *rtu_thread(void *arg)
     VINIT(rtu_list);
 
     /* :HACK: */
-    m.src = 1;
-    m.dst = 247;
+    m.src = 2;
+    m.dst = 1;
     r.type = TCP;
-    r.cfg.hostname = strdup("37.140.168.193");
+    r.cfg.hostname = strdup("84.201.130.34");
     VINIT(r.slave_id);
     QINIT(r.q);
     VADD(r.slave_id, m);
     VADD(rtu_list, r);
 
-    m.src = 2;
+    m.src = 1;
     m.dst = 247;
     r.type = TCP;
     r.cfg.hostname = strdup("37.140.168.194");
@@ -467,7 +502,7 @@ void *rtu_thread(void *arg)
     for (;;) {
         int n;
         time_t cur_time;
-        int nfds = epoll_wait(ep, evs, VLEN(rtu_list), 500);
+        int nfds = epoll_wait(ep, evs, VLEN(rtu_list), 10);
         if (nfds == -1) {
             if (errno == EINTR)
                 continue;
@@ -499,6 +534,7 @@ void *rtu_thread(void *arg)
                 fprintf(stderr, "Read failed, trying to re-open %d\n", ri->fd);
                 continue;
             }
+            DEBUGF("Read %d from %d\n", len, ri->fd);
 
             /* Update cache */
             cache_update(ri, buf, len);
@@ -518,6 +554,7 @@ void *rtu_thread(void *arg)
             /* Invalidate cache pages */
             p = ri->p;
             while (p) {
+                //DEBUGF("-- cache: %lu <> %lu\n", p->ttd, cur_time);
                 if (p->ttd && p->ttd <= cur_time) {
                     p = _page_free(ri, p);
                     continue;
@@ -532,26 +569,29 @@ void *rtu_thread(void *arg)
                 q = &QGET(*qv, n);
                 if (q->stamp && q->stamp <= cur_time) {
                     // build response with TIMEOUT error message
+                    DEBUGF("Remove from queue: %d\n", q->buf[6]);
                     write(q->resp_fd, "\x00\x01\x00", 3);
                     _queue_pop(ri);
                     n--;
                     continue;
-                } else if (q->stamp) {
-                    break;
                 } else {
                     /* Check for cache page */
                     p = _cache_find(ri, q);
                     if (p) {
+                        DEBUGF("Found, responsd to %d len=%d\n", q->resp_fd, p->len);
                         write(q->resp_fd, p->buf, p->len);
                         _queue_pop(ri);
                         n--;
                         continue;
+                    } else if (q->stamp) {
+                        break;
                     }
 
                     /* Make request to RTU */
                     if (write(ri->fd, q->buf, q->len) != q->len) {
                         perror("write() failed");
                     }
+                    DEBUGF("Write to RTU: %d l=%d\n", ri->fd, q->len);
 
                     q->stamp = time(NULL) + RTU_TIMEOUT;
                     break;
@@ -596,20 +636,21 @@ void *tcp_thread(void *p)
 
             len = read(evs[n].data.fd, buf, BUF_SIZE);
             if (len == 0) {
-c_close:
+//c_close:
                 epoll_ctl(self->ep, EPOLL_CTL_DEL, evs[n].data.fd, NULL);
                 close(evs[n].data.fd);
             } else if (len < 0) {
                 perror("Error occured");
             } else {
+#if 0
                 char ans[] = "HTTP/1.1 200 OK\r\nServer: fake/1.0\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>OK</html>\r\n";
                 int sz = sizeof(ans);
                 write(evs[n].data.fd, ans, sz);
-
-                queue_add(1 /* buf[6] */, evs[n].data.fd, buf, len);
+#endif
+                queue_add(buf[6], evs[n].data.fd, buf, len);
 
                 // fprintf(stderr, "%d Read %d bytes from %d\n", self->n, len, evs[n].data.fd);
-                goto c_close;
+                // goto c_close;
             }
         } 
     }
@@ -660,21 +701,6 @@ int main(int argc, char **argv)
         perror("listen() failed");
         return 1;
     }
-
-#if 0
-      /********************************************************************/
-      /* In this example we know that the client will send 250 bytes of   */
-      /* data over.  Knowing this, we can use the SO_RCVLOWAT socket      */
-      /* option and specify that we don't want our recv() to wake up      */
-      /* until all 250 bytes of data have arrived.                        */
-      /********************************************************************/
-      if (setsockopt(sdconn, SOL_SOCKET, SO_RCVLOWAT,
-                     (char *)&rcdsize,sizeof(rcdsize)) < 0)
-      {
-         perror("setsockopt(SO_RCVLOWAT) failed");
-         break;
-      }
-#endif
 
     ep = epoll_create(1);
     if (ep == -1) {
