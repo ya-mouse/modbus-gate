@@ -372,18 +372,48 @@ int rtu_open_tcp(struct rtu_desc *rtu)
     return rtu->fd;
 }
 
-int rtu_open(struct rtu_desc *rtu)
+int rtu_open(struct rtu_desc *rtu, int ep)
 {
+    int rc = -1;
+    struct epoll_event ev;
+
     switch (rtu->type) {
     case RTU:
     case ASCII:
-        return rtu_open_serial(rtu);
+        rc = rtu_open_serial(rtu);
+        if (rc < 0) {
+            printf("Unable to open %s (%d)\n", rtu->cfg.serial.devname, errno);
+        }
+        break;
     
     case TCP:
-        return rtu_open_tcp(rtu);
+        rc = rtu_open_tcp(rtu);
+        if (rc < 0) {
+            printf("Unable to connect to %s (%d)\n", rtu->cfg.hostname, errno);
+        }
+        break;
     }
 
-    return -1;
+    if (rc) {
+        ev.data.fd = rc;
+        ev.events = EPOLLIN | EPOLLERR;
+
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
+            perror("epoll_ctl(rtu) failed");
+            close(rc);
+            rc = -1;
+        }
+    }
+
+    rtu->fd = rc;
+    return rc;
+}
+
+void rtu_close(struct rtu_desc *rtu, int ep)
+{
+    epoll_ctl(ep, EPOLL_CTL_DEL, rtu->fd, NULL);
+    close(rtu->fd);
+    rtu->fd = -1;
 }
 
 void *rtu_thread(void *arg)
@@ -396,7 +426,6 @@ void *rtu_thread(void *arg)
     queue_list_v *qv;
     struct queue_list *q;
     u_int8_t buf[BUF_SIZE];
-    struct epoll_event ev;
     struct epoll_event *evs;
 
     /* TODO: Read config first */
@@ -407,6 +436,15 @@ void *rtu_thread(void *arg)
     m.dst = 247;
     r.type = TCP;
     r.cfg.hostname = strdup("37.140.168.193");
+    VINIT(r.slave_id);
+    QINIT(r.q);
+    VADD(r.slave_id, m);
+    VADD(rtu_list, r);
+
+    m.src = 2;
+    m.dst = 247;
+    r.type = TCP;
+    r.cfg.hostname = strdup("37.140.168.194");
     VINIT(r.slave_id);
     QINIT(r.q);
     VADD(r.slave_id, m);
@@ -423,26 +461,7 @@ void *rtu_thread(void *arg)
 
     /* TODO: Proceed to open all RTU */
     VFOREACH(rtu_list, ri) {
-        ev.data.fd = rtu_open(ri);
-        ev.events = EPOLLIN | EPOLLERR;
-
-        if (ev.data.fd < 0) {
-            switch (ri->type) {
-            case RTU:
-            case ASCII:
-                printf("Unable to open %s (%d)\n", ri->cfg.serial.devname, errno);
-                break;
-
-            case TCP:
-                printf("Unable to connect to %s (%d)\n", ri->cfg.hostname, errno);
-                break;
-            }
-            continue;
-        }
-
-        if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
-            perror("epoll_ctl(0) failed");
-        }
+        rtu_open(ri, ep);
     }
 
     for (;;) {
@@ -468,22 +487,15 @@ void *rtu_thread(void *arg)
             if (!ri) {
                 /* Should never happens, just clear the event */
                 len = read(evs[n].data.fd, buf, BUF_SIZE);
-                close(evs[n].data.fd);
+                rtu_close(ri, ep);
                 continue;
             }
 
             len = read(evs[n].data.fd, buf, BUF_SIZE);
             if (len <= 0) {
                 /* Re-open required */
-                close(evs[n].data.fd);
-                ev.data.fd = rtu_open(ri);
-                ev.events = EPOLLIN | EPOLLERR;
-                if (evs[n].data.fd < 0) {
-                    perror("rtu_open(ri) failed. disabling for a while\n");
-                    ri->fd = -1;
-                } else if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
-                    perror("epoll_ctl(re-open) failed");
-                }
+                rtu_close(ri, ep);
+                rtu_open(ri, ep);
                 fprintf(stderr, "Read failed, trying to re-open %d\n", ri->fd);
                 continue;
             }
@@ -499,14 +511,7 @@ void *rtu_thread(void *arg)
                 /* TODO: handle failed RTUs (number of attemps) and 
                  *       answer to query for failed RTUs
                  */
-                ev.data.fd = rtu_open(ri);
-                ev.events = EPOLLIN | EPOLLERR;
-                if (ev.data.fd < 0)
-                    continue;
-
-                if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
-                    perror("epoll_ctl(0) failed");
-                }
+                rtu_open(ri, ep);
                 continue;
             }
 
@@ -526,7 +531,7 @@ void *rtu_thread(void *arg)
                 /* Check for timeouted items */
                 q = &QGET(*qv, n);
                 if (q->stamp && q->stamp <= cur_time) {
-                    // build response with error message
+                    // build response with TIMEOUT error message
                     write(q->resp_fd, "\x00\x01\x00", 3);
                     _queue_pop(ri);
                     n--;
