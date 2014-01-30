@@ -6,7 +6,6 @@
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/wait.h>
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -17,83 +16,8 @@
 #include <pthread.h>
 #include <time.h>
 
-#include "vect.h"
-
-/* Slave address (1-255 for RTU/ASCII, 0-255 for TCP) */
-
-//#undef DEBUG
-#define DEBUG
-#ifdef DEBUG
-#define DEBUGF(x...) printf(x)
-#else
-#define DEBUGF(x...) do { } while(0);
-#endif
-
-#define CHILD_NUM       4
-#define BUF_SIZE        512
-#define MAX_EVENTS      1024
-#define MODBUS_TCP_PORT 502
-#define RTU_TIMEOUT     1
-#define CACHE_TTL       3
-
-enum rtu_type {
-    ASCII,
-    RTU,
-    TCP,
-};
-
-struct cache_page {
-    u_int8_t status;        /* 0 - ok, 1 - timeout, 2 - NA */
-    u_int8_t slaveid;
-    u_int16_t addr;
-    u_int16_t function;
-    u_int16_t len;
-    time_t ttd;             /* time to die of the page: last_timestamp + TTL */
-    u_int8_t *buf;
-    struct cache_page *next;
-    struct cache_page *prev;
-};
-
-struct queue_list {
-    int resp_fd;            /* "response to" descriptor */
-    u_int8_t *buf;          /* request buffer */
-    size_t len;             /* request length */
-    time_t stamp;           /* timestamp of timeout: last_timestamp + timeout */
-};
-
-typedef QUEUE(struct queue_list) queue_list_v;
-
-struct slave_map {
-    u_int16_t src;
-    u_int16_t dst;
-};
-
-typedef VECT(struct slave_map) slave_map_v;
-
-struct rtu_desc {
-    int fd;                 /* ttySx descriptior */
-    enum rtu_type type;     /* endpoint RTU device type */
-    union {
-        char *hostname;     /* MODBUS-TCP hostname */
-        struct {
-            char *devname;  /* serial device name */
-            int baudrate;   /* device baudrate */
-            int parity;
-            int bits;
-        } serial;
-    } cfg;
-    slave_map_v slave_id;   /* slave_id configured for MODBUS-TCP */
-    queue_list_v q;         /* queue list */
-    struct cache_page *p;   /* cache pages */
-};
-
-typedef VECT(struct rtu_desc) rtu_desc_v;
-
-struct childs {
-    int n;
-    int ep;
-    pthread_t th;
-};
+#include "mbus-gw.h"
+#include "aspp.h"
 
 static rtu_desc_v rtu_list;
 static pthread_rwlock_t rwlock;
@@ -124,7 +48,8 @@ struct rtu_desc *rtu_by_fd(int fd)
 
     pthread_rwlock_rdlock(&rwlock);
     VFOREACH(rtu_list, ri) {
-        if (ri->fd == fd)
+        if (ri->fd == fd ||
+           (ri->type == REALCOM && ri->cfg.realcom.cmdfd == fd))
             goto out;
     }
     ri = NULL;
@@ -172,7 +97,8 @@ void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
     }
     printf("\n");
 
-    printf("update sid=%d addr=%d nb=%d for %d %d\n", slave, addr, nb, buf[6], buf[8] >> 1);
+    printf("update sid=%d addr=%d nb=%d for %d %d\n",
+           slave, addr, nb, buf[6], buf[8] >> 1);
 #endif
 
     /* For error response do not cache the answer, just write it back */
@@ -275,7 +201,8 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
     DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
 
     while (p) {
-        DEBUGF("--> (%d,%d,%d) <> (%d,%d,%d)\n", func, slave, addr, p->function, p->slaveid, p->addr);
+        DEBUGF("--> (%d,%d,%d) <> (%d,%d,%d)\n",
+               func, slave, addr, p->function, p->slaveid, p->addr);
         if (func == p->function && slave == p->slaveid && addr == p->addr)
             return p;
         p = p->next;
@@ -349,23 +276,25 @@ int setnonblocking(int sockfd)
 int rtu_open_serial(struct rtu_desc *rtu)
 {
     /* TODO: setup baud rate, bits and parity */
-    return open(rtu->cfg.serial.devname, O_RDWR | O_NONBLOCK);
+    rtu->fd = open(rtu->cfg.serial.devname, O_RDWR | O_NONBLOCK);
+
+    return rtu->fd;
 }
 
-int rtu_open_tcp(struct rtu_desc *rtu)
+int rtu_open_tcp(struct rtu_desc *rtu, int port)
 {
     struct addrinfo hints;
     struct addrinfo *result, *rp;
     char service[NI_MAXSERV];
 
-    sprintf(service, "%d", 502);
+    sprintf(service, "%d", port);
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC; /* Allow IPv4 or IPv6 */
     hints.ai_socktype = SOCK_STREAM; /* Datagram socket */
     hints.ai_flags = AI_NUMERICSERV;
     hints.ai_protocol = IPPROTO_TCP;
 
-    if (getaddrinfo(rtu->cfg.hostname, service, &hints, &result) != 0) {
+    if (getaddrinfo(rtu->cfg.tcp.hostname, service, &hints, &result) != 0) {
         return -1;
     }
 
@@ -381,6 +310,12 @@ int rtu_open_tcp(struct rtu_desc *rtu)
             int opt = 1;
             /* Set the TCP no delay flag */
             if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
+                           (const void *)&opt, sizeof(int)) == -1) {
+                close(s);
+                continue;
+            }
+
+            if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE,
                            (const void *)&opt, sizeof(int)) == -1) {
                 close(s);
                 continue;
@@ -407,6 +342,31 @@ int rtu_open_tcp(struct rtu_desc *rtu)
     return rtu->fd;
 }
 
+int rtu_open_realcom(struct rtu_desc *rtu)
+{
+    int rc;
+ 
+    rc = rtu_open_tcp(rtu, rtu->cfg.tcp.port);
+    if (rc < 0)
+        return rc;
+
+    rtu->fd = rc;
+
+    /* Proceed with RealCOM config */
+    rc = rtu_open_tcp(rtu, rtu->cfg.realcom.cmdport);
+    if (rc < 0) {
+        close(rtu->fd);
+        rtu->fd = -1;
+        return rc;
+    }
+
+    rtu->cfg.realcom.cmdfd = rc;
+
+    realcom_init(rtu);
+
+    return rtu->fd;
+}
+
 int rtu_open(struct rtu_desc *rtu, int ep)
 {
     int rc = -1;
@@ -422,9 +382,28 @@ int rtu_open(struct rtu_desc *rtu, int ep)
         break;
     
     case TCP:
-        rc = rtu_open_tcp(rtu);
+        rc = rtu_open_tcp(rtu, rtu->cfg.tcp.port);
         if (rc < 0) {
-            printf("Unable to connect to %s (%d)\n", rtu->cfg.hostname, errno);
+            printf("Unable to connect to %s (%d)\n",
+                   rtu->cfg.tcp.hostname, errno);
+        }
+        break;
+
+    case REALCOM:
+        rc = rtu_open_realcom(rtu);
+        if (rc < 0 || rtu->cfg.realcom.cmdfd < 0) {
+            printf("Unable to connect to %s (%d)\n",
+                   rtu->cfg.realcom.hostname, errno);
+        }
+
+        ev.data.fd = rtu->cfg.realcom.cmdfd;
+        ev.events = EPOLLIN | EPOLLERR;
+
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
+            perror("epoll_ctl(realcom) failed");
+            close(rc);
+            close(rtu->cfg.realcom.cmdfd);
+            rc = -1;
         }
         break;
     }
@@ -436,6 +415,10 @@ int rtu_open(struct rtu_desc *rtu, int ep)
         if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
             perror("epoll_ctl(rtu) failed");
             close(rc);
+            if (rtu->type == REALCOM) {
+                epoll_ctl(ep, EPOLL_CTL_DEL, rtu->cfg.realcom.cmdfd, NULL);
+                close(rtu->cfg.realcom.cmdfd);
+            }
             rc = -1;
         }
     }
@@ -448,6 +431,10 @@ void rtu_close(struct rtu_desc *rtu, int ep)
 {
     epoll_ctl(ep, EPOLL_CTL_DEL, rtu->fd, NULL);
     close(rtu->fd);
+    if (rtu->type == REALCOM) {
+        epoll_ctl(ep, EPOLL_CTL_DEL, rtu->cfg.realcom.cmdfd, NULL);
+        close(rtu->cfg.realcom.cmdfd);
+    }
     rtu->fd = -1;
 }
 
@@ -470,7 +457,8 @@ void *rtu_thread(void *arg)
     m.src = 2;
     m.dst = 1;
     r.type = TCP;
-    r.cfg.hostname = strdup("84.201.130.34");
+    r.cfg.tcp.port = 502;
+    r.cfg.tcp.hostname = strdup("84.201.130.34");
     VINIT(r.slave_id);
     QINIT(r.q);
     VADD(r.slave_id, m);
@@ -479,7 +467,7 @@ void *rtu_thread(void *arg)
     m.src = 1;
     m.dst = 247;
     r.type = TCP;
-    r.cfg.hostname = strdup("37.140.168.194");
+    r.cfg.tcp.hostname = strdup("37.140.168.194");
     VINIT(r.slave_id);
     QINIT(r.q);
     VADD(r.slave_id, m);
@@ -535,6 +523,12 @@ void *rtu_thread(void *arg)
                 continue;
             }
             DEBUGF("Read %d from %d\n", len, ri->fd);
+
+            /* Process RealCOM command */
+            if (ri->type == REALCOM && ri->fd != evs[n].data.fd) {
+                realcom_process_cmd(ri, buf, len);
+                continue;
+            }
 
             /* Update cache */
             cache_update(ri, buf, len);
