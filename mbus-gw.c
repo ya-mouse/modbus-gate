@@ -21,7 +21,7 @@
 #define BUF_SIZE        512
 #define MAX_EVENTS      1024
 #define MODBUS_TCP_PORT 502
-#define RTU_TIMEOUT     3
+#define RTU_TIMEOUT     1
 #define CACHE_TTL       3
 
 #define DBL_FREE(e,n)               \
@@ -43,12 +43,12 @@ enum rtu_type {
 };
 
 struct cache_page {
-    int status;         /* 0 - ok, 1 - timeout, 2 - NA */
-    int slaveid;
-    int addr;
-    int function;
-    int len;
-    time_t ttd;         /* time to die of the page: last_timestamp + TTL */
+    u_int8_t status;                    /* 0 - ok, 1 - timeout, 2 - NA */
+    u_int8_t slaveid;
+    u_int16_t addr;
+    u_int16_t function;
+    u_int16_t len;
+    time_t ttd;             /* time to die of the page: last_timestamp + TTL */
     u_int8_t *buf;
     struct cache_page *next;
     struct cache_page *prev;
@@ -63,18 +63,24 @@ struct queue_list {
     struct queue_list *prev;
 };
 
+typedef QUEUE(struct queue_list) queue_list_v;
+
 struct slave_map {
-    int src;
-    int dst;
+    u_int16_t src;
+    u_int16_t dst;
 };
 
+typedef VECT(struct slave_map) slave_map_v;
+
 struct rtu_desc {
-    int fd;               /* ttySx descriptior */
-    enum rtu_type type;   /* endpoint RTU device type */
-    VECT(struct slave_map) slave_id;   /* slave_id configured for MODBUS-TCP */
-    struct queue_list *q; /* queue list */
-    struct cache_page *p; /* cache pages */
+    int fd;                 /* ttySx descriptior */
+    enum rtu_type type;     /* endpoint RTU device type */
+    slave_map_v slave_id;   /* slave_id configured for MODBUS-TCP */
+    queue_list_v q;         /* queue list */
+    struct cache_page *p;   /* cache pages */
 };
+
+typedef VECT(struct rtu_desc) rtu_desc_v;
 
 struct childs {
     int n;
@@ -82,46 +88,44 @@ struct childs {
     pthread_t th;
 };
 
-static VECT(struct rtu_desc) rtu;
+static rtu_desc_v rtu;
 static pthread_rwlock_t rwlock;
 
 struct rtu_desc *rtu_by_slaveid(int slave_id)
 {
     struct slave_map *mi;
     struct rtu_desc *ri;
-    struct rtu_desc *r = NULL;
 
     pthread_rwlock_rdlock(&rwlock);
     VFOREACH(rtu, ri) {
         VFOREACH(ri->slave_id, mi) {
-            if (mi->src == slave_id) {
-                r = ri;
+            if (mi->src == slave_id)
                 goto out;
-            }
         }
     }
+    ri = NULL;
 
 out:
     pthread_rwlock_unlock(&rwlock);
 
-    return r;
+    return ri;
 }
 
 struct rtu_desc *rtu_by_fd(int fd)
 {
-    int i;
-    struct rtu_desc *r = NULL;
+    struct rtu_desc *ri;
 
     pthread_rwlock_rdlock(&rwlock);
-    VFORI(rtu, i) {
-        if (VGET(rtu, i).fd == fd) {
-            r = &VGET(rtu, i);
-            break;
-        }
+    VFOREACH(rtu, ri) {
+        if (ri->fd == fd)
+            goto out;
     }
+    ri = NULL;
+
+out:
     pthread_rwlock_unlock(&rwlock);
 
-    return r;
+    return ri;
 }
 
 void cache_update(struct rtu_desc *rtu, u_int8_t *buf, size_t len)
@@ -132,7 +136,7 @@ void cache_update(struct rtu_desc *rtu, u_int8_t *buf, size_t len)
     struct cache_page *p;
     struct cache_page *new;
 
-    if (!rtu || !rtu->q)
+    if (!rtu || !rtu->p)
         return;
 
     pthread_rwlock_wrlock(&rwlock);
@@ -210,44 +214,37 @@ struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
 
 int queue_add(struct rtu_desc *rtu, int fd, u_int8_t *buf, size_t len)
 {
-    struct queue_list *q;
+    struct queue_list q;
 
     if (!rtu)
         return -1;
 
     pthread_rwlock_wrlock(&rwlock);
-    if (!rtu->q) {
-        q = rtu->q = calloc(1, sizeof(struct queue_list));
-    } else {
-        q = rtu->q;
-        while (q->next != NULL)
-            q = q->next;
-        q->next = malloc(sizeof(struct queue_list));
-        q->next->prev = q;
-        q = q->next;
-    }
-    q->stamp = 0;
-    q->next = NULL;
-    q->resp_fd = fd;
-    q->buf = malloc(len);
-    q->len = len;
-    memcpy(q->buf, buf, len);
+
+    q.stamp = 0;
+    q.resp_fd = fd;
+    q.buf = malloc(len);
+    q.len = len;
+    memcpy(q.buf, buf, len);
+
+    QADD(rtu->q, q);
+
     pthread_rwlock_unlock(&rwlock);
 
     return 0;
 }
 
-struct queue_list *_queue_free(struct rtu_desc *rtu, struct queue_list *q)
+void _queue_pop(struct rtu_desc *rtu)
 {
-    struct queue_list *next;
+    struct queue_list *q;
 
-    if (!q)
-        return NULL;
+    if (!rtu)
+        return;
 
+    q = &QREMOVE(rtu->q);
     close(q->resp_fd);
-    DBL_FREE(q, next);
-
-    return next;
+    free(q->buf);
+    q->buf = NULL;
 }
 
 int setnonblocking(int sockfd)
@@ -267,8 +264,10 @@ void *rtu_thread(void *arg)
 {
     int ep;
     struct rtu_desc r;
+    struct rtu_desc *ri;
     struct slave_map m;
     struct cache_page *p;
+    queue_list_v *qv;
     struct queue_list *q;
     u_int8_t buf[BUF_SIZE];
     struct epoll_event ev;
@@ -282,6 +281,7 @@ void *rtu_thread(void *arg)
     m.src = 1;
     m.dst = 1;
     VINIT(r.slave_id);
+    QINIT(r.q);
     VADD(r.slave_id, m);
     VADD(rtu, r);
     /* :HACK: */
@@ -342,28 +342,30 @@ void *rtu_thread(void *arg)
 
         pthread_rwlock_wrlock(&rwlock);
         cur_time = time(NULL);
-        VFORI(rtu, n) {
-            if (!VGET(rtu, n).fd)
+        VFOREACH(rtu, ri) {
+            if (!ri->fd)
                 break;
 
             /* Invalidate cache pages */
-            p = VGET(rtu, n).p;
+            p = ri->p;
             while (p) {
                 if (p->ttd && p->ttd <= cur_time) {
-                    p = _page_free(&VGET(rtu, n), p);
+                    p = _page_free(ri, p);
                     continue;
                 }
                 p = p->next;
             }
 
             /* Process queue */
-            q = VGET(rtu, n).q;
-            while (q) {
+            qv = &ri->q;
+            for (n = 0; n < QLEN(*qv); ++n) {
                 /* Check for timeouted items */
+                q = &QGET(*qv, n);
                 if (q->stamp && q->stamp <= cur_time) {
                     // build response with error message
                     write(q->resp_fd, "\x00\x01\x00", 3);
-                    q = _queue_free(&VGET(rtu, n), q);
+                    _queue_pop(ri);
+                    n--;
                     continue;
                 } else if (q->stamp) {
                     break;
@@ -374,11 +376,12 @@ void *rtu_thread(void *arg)
                     /* Check for cache page or process new request */
                     if (found) {
                         write(q->resp_fd, "\x00\x01\x00", 3);
-                        q = _queue_free(&VGET(rtu ,n), q);
+                        _queue_pop(ri);
+                        n--;
                         continue;
                     }
 
-                    if (write(VGET(rtu, n).fd, q->buf, q->len) != q->len) {
+                    if (write(ri->fd, q->buf, q->len) != q->len) {
                         perror("write() failed");
                     }
 
@@ -386,7 +389,7 @@ void *rtu_thread(void *arg)
                     break;
                 }
             }
-//            printf("slave_id=%d queue=%d\n", VGET(rtu, n).slave_id, i);
+//            printf("slave_id=%d queue=%d\n", ri->slave_id, i);
         }
         pthread_rwlock_unlock(&rwlock);
     }
