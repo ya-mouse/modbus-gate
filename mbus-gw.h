@@ -93,4 +93,6 @@ struct childs {
     pthread_t th;
 };
 
+extern rtu_desc_v rtu_list;
+
 #endif /* _MBUS_GW__H */

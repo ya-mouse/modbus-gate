@@ -1,10 +1,11 @@
 GCC  = gcc
 CFLAGS = -Wall -Wno-unused-result
-LIBS = -lpthread -g
+LIBS = -lpthread -lyaml -g
 
 C_SRCS = \
 	mbus-gw.c \
 	aspp.c \
+	cfg.c \
 	
 
 C_OBJS = $(C_SRCS:%.c=%.o)

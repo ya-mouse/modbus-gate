@@ -16,12 +16,11 @@
 #include <pthread.h>
 #include <time.h>
 
-#include <linux/serial_reg.h>
-
 #include "mbus-gw.h"
 #include "aspp.h"
+#include "cfg.h"
 
-static rtu_desc_v rtu_list;
+rtu_desc_v rtu_list;
 static pthread_rwlock_t rwlock;
 
 struct rtu_desc *rtu_by_slaveid(int slave_id)
@@ -702,7 +701,13 @@ int main(int argc, char **argv)
     struct sockaddr_in6 sin6;
     struct epoll_event ev;
     struct epoll_event evs[1];
+    struct cfg *cfg;
     static struct childs childs[CHILD_NUM+1];
+
+    cfg = cfg_load("mbus.conf");
+    if (!cfg) {
+        return 1;
+    }
 
     if ((sd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
         perror("socket() failed");
