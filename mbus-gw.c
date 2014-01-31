@@ -207,7 +207,7 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
     addr = (q->buf[8] << 8) | q->buf[9];
     nb = (q->buf[10] << 8) | q->buf[11];
 
-    DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
+//    DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
 
     while (p) {
         DEBUGF("--> (%d,%d,%d) <> (%d,%d,%d)\n",
@@ -370,7 +370,6 @@ int rtu_open_realcom(struct rtu_desc *rtu)
 
     realcom_init(rtu);
 
-    printf("rtu-fd=%d\n", rtu->fd);
     return rtu->fd;
 }
 
@@ -478,10 +477,10 @@ void *rtu_thread(void *arg)
     r.cfg.realcom.hostname = strdup("178.154.201.108");
     r.cfg.realcom.cmdport = 966;
     r.cfg.realcom.port = 950;
-    r.cfg.realcom.modem_control = 0; //UART_MCR_RTS;
+    r.cfg.realcom.modem_control = 0;
     r.cfg.realcom.flags = 0;
     r.cfg.realcom.t.c_iflag = 0;
-    r.cfg.realcom.t.c_cflag = CS8 | B115200;
+    r.cfg.realcom.t.c_cflag = CS8 | B9600;
     VINIT(r.slave_id);
     QINIT(r.q);
     VADD(r.slave_id, m);
@@ -602,6 +601,7 @@ void *rtu_thread(void *arg)
                         break;
                     }
 
+                    if (ri->type == TCP) {
 #if 1
                     /* Fixup TID */
                     ri->tido[0] = q->buf[0];
@@ -616,6 +616,9 @@ void *rtu_thread(void *arg)
                     /* Make request to RTU */
                     if (write(ri->fd, q->buf, q->len) != q->len) {
                         perror("write() failed");
+                    }
+                    } else {
+                        write(ri->fd, q->buf+6, q->len-6);
                     }
                     DEBUGF("Write to RTU: %d l=%d\n", ri->fd, q->len);
 
