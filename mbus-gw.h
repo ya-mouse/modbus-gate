@@ -19,7 +19,7 @@
 #define MAX_EVENTS      1024
 #define MODBUS_TCP_PORT 502
 #define RTU_TIMEOUT     3
-#define CACHE_TTL       3
+#define CACHE_TTL       1
 
 enum rtu_type {
     ASCII,

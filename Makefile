@@ -11,12 +11,12 @@ C_OBJS = $(C_SRCS:%.c=%.o)
 
 all: mbus-gw
 
-mbus-gw.c: mbus-gw.h aspp.h vect.h
-
-aspp.c: aspp.h
-
-.o.c:
+%.o: %.c
 	$(GCC) -O3 -g -c -o $@ $^ $(CFLAGS)
+
+#mbus-gw.o: mbus-gw.h aspp.h vect.h
+
+#aspp.o: aspp.h
 
 mbus-gw: $(C_OBJS)
 	$(GCC) -o $@ $^ $(LIBS)

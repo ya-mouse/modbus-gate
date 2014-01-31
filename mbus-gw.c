@@ -16,6 +16,8 @@
 #include <pthread.h>
 #include <time.h>
 
+#include <linux/serial_reg.h>
+
 #include "mbus-gw.h"
 #include "aspp.h"
 
@@ -353,24 +355,22 @@ int rtu_open_realcom(struct rtu_desc *rtu)
 {
     int rc;
  
-    rc = rtu_open_tcp(rtu, rtu->cfg.tcp.port);
+    rc = rtu_open_tcp(rtu, rtu->cfg.realcom.cmdport);
     if (rc < 0)
         return rc;
 
-    rtu->fd = rc;
+    rtu->cfg.realcom.cmdfd = rc;
 
-    /* Proceed with RealCOM config */
-    rc = rtu_open_tcp(rtu, rtu->cfg.realcom.cmdport);
+    rc = rtu_open_tcp(rtu, rtu->cfg.tcp.port);
     if (rc < 0) {
-        close(rtu->fd);
+        close(rtu->cfg.realcom.cmdport);
         rtu->fd = -1;
         return rc;
     }
 
-    rtu->cfg.realcom.cmdfd = rc;
-
     realcom_init(rtu);
 
+    printf("rtu-fd=%d\n", rtu->fd);
     return rtu->fd;
 }
 
@@ -473,9 +473,15 @@ void *rtu_thread(void *arg)
     VADD(rtu_list, r);
 
     m.src = 1;
-    m.dst = 247;
-    r.type = TCP;
-    r.cfg.tcp.hostname = strdup("37.140.168.194");
+    m.dst = 1;
+    r.type = REALCOM;
+    r.cfg.realcom.hostname = strdup("178.154.201.108");
+    r.cfg.realcom.cmdport = 966;
+    r.cfg.realcom.port = 950;
+    r.cfg.realcom.modem_control = 0; //UART_MCR_RTS;
+    r.cfg.realcom.flags = 0;
+    r.cfg.realcom.t.c_iflag = 0;
+    r.cfg.realcom.t.c_cflag = CS8 | B115200;
     VINIT(r.slave_id);
     QINIT(r.q);
     VADD(r.slave_id, m);
@@ -530,10 +536,11 @@ void *rtu_thread(void *arg)
                 fprintf(stderr, "Read failed, trying to re-open %d\n", ri->fd);
                 continue;
             }
-            DEBUGF("Read %d from %d\n", len, ri->fd);
+            DEBUGF("Read %d from %d\n", len, evs[n].data.fd);
 
             /* Process RealCOM command */
             if (ri->type == REALCOM && ri->fd != evs[n].data.fd) {
+                printf("Process CMD %d (%d,%d)\n", len, ri->fd, evs[n].data.fd);
                 realcom_process_cmd(ri, buf, len);
                 continue;
             }
@@ -604,7 +611,7 @@ void *rtu_thread(void *arg)
                     ri->tid++;
                     /* Zero is not allowed as TID */
                     if (!ri->tid)
-                        ri->tid++;
+                        ri->tid ^= 1;
 #endif
                     /* Make request to RTU */
                     if (write(ri->fd, q->buf, q->len) != q->len) {
