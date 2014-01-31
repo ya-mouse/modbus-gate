@@ -19,8 +19,158 @@ static void cfg_expect_event(struct cfg *cfg, const enum yaml_event_type_e type)
     yaml_event_delete(&event);
 }
 
+static int cfg_get_int(struct cfg *cfg, int def)
+{
+    int v;
+    yaml_event_t event;
+
+    if (cfg->err)
+        return def;
+
+    yaml_parser_parse(&cfg->parser, &event);
+    if (event.type != YAML_SCALAR_EVENT) {
+        cfg->err = PARSER_SYNTAX;
+        v = def;
+    } else {
+        v = atoi((char *)event.data.scalar.value);
+    }
+    yaml_event_delete(&event);
+
+    return v;
+}
+
+static void cfg_parse_map(struct cfg *cfg)
+{
+    char *v;
+    yaml_event_t event;
+
+    if (cfg->err)
+        return;
+
+    for (;;) {
+        if (cfg->err)
+            return;
+
+        yaml_parser_parse(&cfg->parser, &event);
+        switch (event.type) {
+        case YAML_SCALAR_EVENT:
+            v = (char *)event.data.scalar.value;
+            printf("scalar %s\n", v);
+            break;
+
+        case YAML_MAPPING_END_EVENT:
+            yaml_event_delete(&event);
+            return;
+
+        default:
+            cfg->err = PARSER_SYNTAX;
+            printf("Unknown elem %d\n", event.type);
+            break;
+        }
+        yaml_event_delete(&event);
+    }
+}
+
+static void cfg_parse_map_list(struct cfg *cfg)
+{
+    yaml_event_t event;
+
+    if (cfg->err)
+        return;
+
+    cfg_expect_event(cfg, YAML_SEQUENCE_START_EVENT);
+    for (;;) {
+        if (cfg->err)
+            return;
+
+        yaml_parser_parse(&cfg->parser, &event);
+        switch (event.type) {
+        case YAML_MAPPING_START_EVENT:
+            cfg_parse_map(cfg);
+            break;
+
+        case YAML_SEQUENCE_END_EVENT:
+            yaml_event_delete(&event);
+            return;
+
+        default:
+            cfg->err = PARSER_SYNTAX;
+            printf("Unknown elem %d\n", event.type);
+            break;
+        }
+        yaml_event_delete(&event);
+    }
+}
+
+static void cfg_parse_rtu(struct cfg *cfg)
+{
+    char *v;
+    yaml_event_t event;
+
+    if (cfg->err)
+        return;
+
+    for (;;) {
+        if (cfg->err)
+            return;
+
+        yaml_parser_parse(&cfg->parser, &event);
+        switch (event.type) {
+        case YAML_SCALAR_EVENT:
+            v = (char *)event.data.scalar.value;
+            printf("scalar %s\n", v);
+            if (!strcmp(v, "map")) {
+                cfg_parse_map_list(cfg);
+            }
+            break;
+
+        case YAML_MAPPING_END_EVENT:
+            yaml_event_delete(&event);
+            return;
+
+        default:
+            cfg->err = PARSER_SYNTAX;
+            printf("Unknown elem %d\n", event.type);
+            break;
+        }
+        yaml_event_delete(&event);
+    }    
+}
+
+static void cfg_parse_rtu_list(struct cfg *cfg)
+{
+    yaml_event_t event;
+
+    if (cfg->err)
+        return;
+
+    cfg_expect_event(cfg, YAML_SEQUENCE_START_EVENT);
+    for (;;) {
+        if (cfg->err)
+            return;
+
+        yaml_parser_parse(&cfg->parser, &event);
+        switch (event.type) {
+        case YAML_MAPPING_START_EVENT:
+            cfg_parse_rtu(cfg);
+            break;
+
+        case YAML_SEQUENCE_END_EVENT:
+            yaml_event_delete(&event);
+            return;
+
+        default:
+            cfg->err = PARSER_SYNTAX;
+            printf("Unknown elem %d\n", event.type);
+            break;
+        }
+        yaml_event_delete(&event);
+    }
+}
+
 static void cfg_parse_first_layer(struct cfg *cfg)
 {
+    char *v;
     yaml_event_t event;
 
     cfg_expect_event(cfg, YAML_MAPPING_START_EVENT);
@@ -31,7 +181,13 @@ static void cfg_parse_first_layer(struct cfg *cfg)
         yaml_parser_parse(&cfg->parser, &event);
         switch (event.type) {
         case YAML_SCALAR_EVENT:
-            printf("scalar %s\n", (char *)event.data.scalar.value);
+            v = (char *)event.data.scalar.value;
+            printf("scalar %s\n", v);
+            if (!strcmp(v, "ttl")) {
+                cfg->ttl = cfg_get_int(cfg, 3);
+            } else if (!strcmp(v, "rtu")) {
+                cfg_parse_rtu_list(cfg);
+            }
             break;
 
         case YAML_MAPPING_END_EVENT:
@@ -40,7 +196,8 @@ static void cfg_parse_first_layer(struct cfg *cfg)
 
         default:
             // Syntax error
-            printf("Unknown elem %d\n", event.type);
+            cfg->err = PARSER_SYNTAX;
+            printf("first_layer: Unknown elem %d\n", event.type);
             break;
         }
 
