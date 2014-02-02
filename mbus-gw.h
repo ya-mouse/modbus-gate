@@ -22,6 +22,7 @@
 #define CACHE_TTL       1
 
 enum rtu_type {
+    NONE,
     ASCII,
     RTU,
     TCP,
@@ -50,8 +51,8 @@ struct queue_list {
 typedef QUEUE(struct queue_list) queue_list_v;
 
 struct slave_map {
-    u_int16_t src;
-    u_int16_t dst;
+    int16_t src;
+    int16_t dst;
 };
 
 typedef VECT(struct slave_map) slave_map_v;
@@ -63,13 +64,14 @@ struct rtu_desc {
     u_int16_t tid;
     u_int8_t tido[2];
     union {
+#define RTU_CFG_COMMON       \
+            char *hostname;  \
+            int port
         struct {
-            char *hostname;     /* MODBUS-TCP hostname */
-            int port;
+            RTU_CFG_COMMON;
         } tcp;
         struct {
-            char *hostname;     /* Moxa RealCOM */
-            int port;
+            RTU_CFG_COMMON;
             int cmdport;
             int cmdfd;
             struct termio t;
@@ -80,6 +82,7 @@ struct rtu_desc {
             char *devname;  /* serial device name */
             struct termio t;
         } serial;
+#undef RTU_CFG_COMMON
     } cfg;
     queue_list_v q;         /* queue list */
     struct cache_page *p;   /* cache pages */
@@ -91,8 +94,9 @@ struct childs {
     int n;
     int ep;
     pthread_t th;
+    struct cfg *cfg;
 };
 
-extern rtu_desc_v rtu_list;
+//extern rtu_desc_v rtu_list;
 
 #endif /* _MBUS_GW__H */

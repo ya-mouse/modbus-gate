@@ -20,16 +20,16 @@
 #include "aspp.h"
 #include "cfg.h"
 
-rtu_desc_v rtu_list;
+// rtu_desc_v rtu_list;
 static pthread_rwlock_t rwlock;
 
-struct rtu_desc *rtu_by_slaveid(int slave_id)
+struct rtu_desc *rtu_by_slaveid(struct cfg *cfg, int slave_id)
 {
     struct slave_map *mi;
     struct rtu_desc *ri;
 
     pthread_rwlock_rdlock(&rwlock);
-    VFOREACH(rtu_list, ri) {
+    VFOREACH(cfg->rtu_list, ri) {
         VFOREACH(ri->slave_id, mi) {
             if (mi->src == slave_id)
                 goto out;
@@ -43,12 +43,12 @@ out:
     return ri;
 }
 
-struct rtu_desc *rtu_by_fd(int fd)
+struct rtu_desc *rtu_by_fd(struct cfg *cfg, int fd)
 {
     struct rtu_desc *ri;
 
     pthread_rwlock_rdlock(&rwlock);
-    VFOREACH(rtu_list, ri) {
+    VFOREACH(cfg->rtu_list, ri) {
         if (ri->fd == fd ||
            (ri->type == REALCOM && ri->cfg.realcom.cmdfd == fd))
             goto out;
@@ -219,7 +219,8 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
     return p;
 }
 
-int queue_add(int slave_id, int fd, const u_int8_t *buf, size_t len)
+int queue_add(struct cfg *cfg,
+              int slave_id, int fd, const u_int8_t *buf, size_t len)
 {
     struct slave_map *mi;
     struct rtu_desc *ri;
@@ -227,7 +228,7 @@ int queue_add(int slave_id, int fd, const u_int8_t *buf, size_t len)
 
     pthread_rwlock_wrlock(&rwlock);
 
-    VFOREACH(rtu_list, ri) {
+    VFOREACH(cfg->rtu_list, ri) {
         VFOREACH(ri->slave_id, mi) {
             if (mi->src == slave_id)
                 goto found;
@@ -238,7 +239,7 @@ int queue_add(int slave_id, int fd, const u_int8_t *buf, size_t len)
     return -2;
 
 found:
-    DEBUGF("Adding sid=%d to queue len=%d\n", slave_id, len);
+    DEBUGF("Adding sid=%d to queue len=%d fd=%d\n", slave_id, len, fd);
 
     q.stamp = 0;
     q.resp_fd = fd;
@@ -336,9 +337,16 @@ int rtu_open_tcp(struct rtu_desc *rtu, int port)
                 continue;
             }
 
-            if (connect(s, rp->ai_addr, rp->ai_addrlen) != 0) {
+            if (setnonblocking(s) < 0) {
                 close(s);
                 continue;
+            }
+
+            if (connect(s, rp->ai_addr, rp->ai_addrlen) != 0) {
+                if (errno != EINPROGRESS) {
+                    close(s);
+                    continue;
+                }
             }
 
             rtu->fd = s;
@@ -362,7 +370,9 @@ int rtu_open_realcom(struct rtu_desc *rtu)
 
     rc = rtu_open_tcp(rtu, rtu->cfg.tcp.port);
     if (rc < 0) {
-        close(rtu->cfg.realcom.cmdport);
+        if (rtu->cfg.realcom.cmdfd != -1)
+            close(rtu->cfg.realcom.cmdfd);
+        rtu->cfg.realcom.cmdfd = -1;
         rtu->fd = -1;
         return rc;
     }
@@ -378,6 +388,8 @@ int rtu_open(struct rtu_desc *rtu, int ep)
     struct epoll_event ev;
 
     switch (rtu->type) {
+    case NONE:
+        break;
     case RTU:
     case ASCII:
         rc = rtu_open_serial(rtu);
@@ -399,23 +411,29 @@ int rtu_open(struct rtu_desc *rtu, int ep)
         if (rc < 0 || rtu->cfg.realcom.cmdfd < 0) {
             printf("Unable to connect to %s (%d)\n",
                    rtu->cfg.realcom.hostname, errno);
+            if (rtu->cfg.realcom.cmdfd != -1)
+                close(rtu->cfg.realcom.cmdfd);
+            if (rc != -1)
+                close(rc);
+            rc = -1;
+            break;
         }
 
         ev.data.fd = rtu->cfg.realcom.cmdfd;
-        ev.events = EPOLLIN | EPOLLERR;
+        ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
 
         if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
             perror("epoll_ctl(realcom) failed");
             close(rc);
-            close(rtu->cfg.realcom.cmdfd);
+            rtu->cfg.realcom.cmdfd = -1;
             rc = -1;
         }
         break;
     }
 
-    if (rc) {
+    if (rc != -1) {
         ev.data.fd = rc;
-        ev.events = EPOLLIN | EPOLLERR;
+        ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
 
         if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
             perror("epoll_ctl(rtu) failed");
@@ -446,63 +464,30 @@ void rtu_close(struct rtu_desc *rtu, int ep)
 void *rtu_thread(void *arg)
 {
     int ep;
-    struct rtu_desc r;
     struct rtu_desc *ri;
-    struct slave_map m;
     struct cache_page *p;
     queue_list_v *qv;
     struct queue_list *q;
     u_int8_t buf[BUF_SIZE];
     struct epoll_event *evs;
+    struct cfg *cfg = (struct cfg *)arg;
 
-    /* TODO: Read config first */
-    VINIT(rtu_list);
-
-    /* :HACK: */
-    m.src = 2;
-    m.dst = 1;
-    r.tid = 1;
-    r.type = TCP;
-    r.cfg.tcp.port = 502;
-    r.cfg.tcp.hostname = strdup("84.201.130.34");
-    VINIT(r.slave_id);
-    QINIT(r.q);
-    VADD(r.slave_id, m);
-    VADD(rtu_list, r);
-
-    m.src = 1;
-    m.dst = 1;
-    r.type = REALCOM;
-    r.cfg.realcom.hostname = strdup("178.154.201.108");
-    r.cfg.realcom.cmdport = 966;
-    r.cfg.realcom.port = 950;
-    r.cfg.realcom.modem_control = 0;
-    r.cfg.realcom.flags = 0;
-    r.cfg.realcom.t.c_iflag = 0;
-    r.cfg.realcom.t.c_cflag = CS8 | B9600;
-    VINIT(r.slave_id);
-    QINIT(r.q);
-    VADD(r.slave_id, m);
-    VADD(rtu_list, r);
-    /* :HACK: */
-
-    ep = epoll_create(VLEN(rtu_list));
+    ep = epoll_create(VLEN(cfg->rtu_list));
     if (ep == -1) {
         perror("epoll_create() failed");
         return NULL;
     }
 
-    evs = malloc(sizeof(struct epoll_event) * VLEN(rtu_list));
+    evs = malloc(sizeof(struct epoll_event) * VLEN(cfg->rtu_list));
 
-    /* TODO: Proceed to open all RTU */
-    VFOREACH(rtu_list, ri) {
+    VFOREACH(cfg->rtu_list, ri) {
         rtu_open(ri, ep);
     }
 
     for (;;) {
         int n;
         time_t cur_time;
-        int nfds = epoll_wait(ep, evs, VLEN(rtu_list), 10);
+        int nfds = epoll_wait(ep, evs, VLEN(cfg->rtu_list), 10);
         if (nfds == -1) {
             if (errno == EINTR)
                 continue;
@@ -510,15 +495,32 @@ void *rtu_thread(void *arg)
             goto err;
         }
 
+#if 0
+    if (getsockopt (socketFD, SOL_SOCKET, SO_ERROR, &retVal, &retValLen) < 0)
+    {
+       // ERROR, fail somehow, close socket
+    }
+
+    if (retVal != 0) 
+    {
+       // ERROR: connect did not "go through"
+    }
+#endif
+
         /* Process RTU data */
         for (n = 0; n < nfds; ++n) {
             int len;
 
-            if (!(evs[n].events & EPOLLIN))
+            if (!(evs[n].events & EPOLLIN)) {
+                if (evs[n].events & EPOLLOUT) {
+//                    epoll_ctl(self->ep, EPOLL_CTL_DEL, evs[n].data.fd, NULL);
+//                    printf("ev=%x\n", evs[n].events);
+                }
                 continue;
+            }
 
             /* Get RTU by descriptor */
-            ri = rtu_by_fd(evs[n].data.fd);
+            ri = rtu_by_fd(cfg, evs[n].data.fd);
             if (!ri) {
                 /* Should never happens, just clear the event */
                 len = read(evs[n].data.fd, buf, BUF_SIZE);
@@ -549,7 +551,7 @@ void *rtu_thread(void *arg)
 
         pthread_rwlock_wrlock(&rwlock);
         cur_time = time(NULL);
-        VFOREACH(rtu_list, ri) {
+        VFOREACH(cfg->rtu_list, ri) {
             if (!ri->fd) {
                 /* TODO: handle failed RTUs (number of attemps) and 
                  *       answer to query for failed RTUs
@@ -675,7 +677,7 @@ void *tcp_thread(void *p)
                 int sz = sizeof(ans);
                 write(evs[n].data.fd, ans, sz);
 #endif
-                queue_add(buf[6], evs[n].data.fd, buf, len);
+                queue_add(self->cfg, buf[6], evs[n].data.fd, buf, len);
 
                 // fprintf(stderr, "%d Read %d bytes from %d\n", self->n, len, evs[n].data.fd);
                 // goto c_close;
@@ -755,7 +757,7 @@ int main(int argc, char **argv)
 
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&rtu_proc, &attr, rtu_thread, NULL) < 0) {
+    if (pthread_create(&rtu_proc, &attr, rtu_thread, cfg) < 0) {
         perror("pthread_create() failed");
         return 2;
     }
@@ -764,6 +766,7 @@ int main(int argc, char **argv)
         pthread_attr_init(&attr);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
         childs[n].n = n;
+        childs[n].cfg = cfg;
         if (pthread_create(&childs[n].th, &attr, tcp_thread, &childs[n]) < 0) {
             perror("pthread_create() failed");
             return 2;
