@@ -214,8 +214,8 @@ static void cfg_parse_rtu(struct cfg *cfg)
                 }
             } else if (!strcmp(v, "port")) {
                 iv = cfg_get_int(cfg, -1);
-                if (r.type == TCP || r.type == REALCOM) {
-                    r.cfg.tcp.port = iv;
+                if ((r.type == TCP || r.type == REALCOM) && iv != -1) {
+                    r.cfg.tcp.port = 950 + iv - 1;
                 } else {
                     cfg->err = INVALID_PARAM;
                     fprintf(stderr, "Invalid param PORT for the RTU\n");
@@ -242,7 +242,7 @@ static void cfg_parse_rtu(struct cfg *cfg)
                     fprintf(stderr, "PORT value required for RealCOM RTU\n");
                     goto out;
                 }
-                r.cfg.realcom.cmdport = 950 + 16 + r.cfg.realcom.port - 1;
+                r.cfg.realcom.cmdport = 16 + r.cfg.realcom.port;
             }
             VADD(cfg->rtu_list, r);
 
@@ -309,7 +309,13 @@ static void cfg_parse_first_layer(struct cfg *cfg)
             v = (char *)event.data.scalar.value;
             printf("scalar %s\n", v);
             if (!strcmp(v, "ttl")) {
-                cfg->ttl = cfg_get_int(cfg, 3);
+                cfg->ttl = cfg_get_int(cfg, CFG_DEFAULT_TTL);
+            } else if (!strcmp(v, "workers")) {
+                cfg->workers = cfg_get_int(cfg, CFG_DEFAULT_WORKERS);
+            } else if (!strcmp(v, "socket")) {
+                if (!(v = cfg_get_string(cfg, NULL, &event)))
+                    break;
+                cfg->sockfile = strdup(v);
             } else if (!strcmp(v, "rtu")) {
                 cfg_parse_rtu_list(cfg);
             }
@@ -339,6 +345,12 @@ static void cfg_parse_config(struct cfg *cfg)
     cfg_expect_event(cfg, YAML_STREAM_END_EVENT);
 }
 
+void cfg_free(struct cfg *cfg)
+{
+    free(cfg->sockfile);
+    free(cfg);
+}
+
 struct cfg *cfg_load(const char *fname)
 {
     FILE *fp;
@@ -350,6 +362,9 @@ struct cfg *cfg_load(const char *fname)
     }
 
     cfg = calloc(1, sizeof(struct cfg));
+    cfg->workers = CFG_DEFAULT_WORKERS;
+    cfg->ttl = CFG_DEFAULT_TTL;
+    cfg->sockfile = strdup(CFG_DEFAULT_SOCKFILE);
 
     yaml_parser_initialize(&cfg->parser);
     yaml_parser_set_input_file(&cfg->parser, fp);
@@ -359,8 +374,7 @@ struct cfg *cfg_load(const char *fname)
     fclose(fp);
 
     if (cfg->err) {
-        // free fields
-        free(cfg);
+        cfg_free(cfg);
         cfg = NULL;
     }
     return cfg;
