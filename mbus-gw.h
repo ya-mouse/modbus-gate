@@ -14,7 +14,6 @@
 #define DEBUGF(x...) do { } while(0);
 #endif
 
-#define CHILD_NUM       4
 #define BUF_SIZE        512
 #define MAX_EVENTS      1024
 #define MODBUS_TCP_PORT 502
@@ -59,6 +58,7 @@ typedef VECT(struct slave_map) slave_map_v;
 
 struct rtu_desc {
     int fd;                 /* ttySx descriptior */
+    int retries;            /* number of retries */
     enum rtu_type type;     /* endpoint RTU device type */
     slave_map_v slave_id;   /* slave_id configured for MODBUS-TCP */
     u_int16_t tid;

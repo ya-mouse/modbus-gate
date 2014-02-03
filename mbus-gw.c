@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/wait.h>
+#include <sys/un.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -355,6 +356,7 @@ int rtu_open_tcp(struct rtu_desc *rtu, int port)
     }
     freeaddrinfo(result);
 
+    rtu->retries++;
     return rtu->fd;
 }
 
@@ -386,6 +388,10 @@ int rtu_open(struct rtu_desc *rtu, int ep)
 {
     int rc = -1;
     struct epoll_event ev;
+
+    if (rtu->retries > CFG_MAX_RETRIES) {
+        return -1;
+    }
 
     switch (rtu->type) {
     case NONE:
@@ -452,11 +458,14 @@ int rtu_open(struct rtu_desc *rtu, int ep)
 
 void rtu_close(struct rtu_desc *rtu, int ep)
 {
-    epoll_ctl(ep, EPOLL_CTL_DEL, rtu->fd, NULL);
-    close(rtu->fd);
-    if (rtu->type == REALCOM) {
+    if (rtu->fd) {
+        epoll_ctl(ep, EPOLL_CTL_DEL, rtu->fd, NULL);
+        close(rtu->fd);
+    }
+    if (rtu->type == REALCOM && rtu->cfg.realcom.cmdfd) {
         epoll_ctl(ep, EPOLL_CTL_DEL, rtu->cfg.realcom.cmdfd, NULL);
         close(rtu->cfg.realcom.cmdfd);
+        rtu->cfg.realcom.cmdfd = -1;
     }
     rtu->fd = -1;
 }
@@ -512,7 +521,9 @@ void *rtu_thread(void *arg)
             int len;
 
             if (!(evs[n].events & EPOLLIN)) {
-                if (evs[n].events & EPOLLOUT) {
+                if (evs[n].events & EPOLLHUP) {
+                    goto reconnect;
+                } else if (evs[n].events & EPOLLOUT) {
 //                    epoll_ctl(self->ep, EPOLL_CTL_DEL, evs[n].data.fd, NULL);
 //                    printf("ev=%x\n", evs[n].events);
                 }
@@ -530,10 +541,13 @@ void *rtu_thread(void *arg)
 
             len = read(evs[n].data.fd, buf, BUF_SIZE);
             if (len <= 0) {
+reconnect:
+                /* TODO: reset "retries" counters after a delay */
                 /* Re-open required */
+                fprintf(stderr, "Read failed (%d), trying to re-open %d\n",
+                        errno, ri->fd);
                 rtu_close(ri, ep);
                 rtu_open(ri, ep);
-                fprintf(stderr, "Read failed, trying to re-open %d\n", ri->fd);
                 continue;
             }
             DEBUGF("Read %d from %d\n", len, evs[n].data.fd);
@@ -696,23 +710,35 @@ int main(int argc, char **argv)
     int c;
     int n;
     int sd;
+    int ud;
     int ep;
     int cur_child = 0;
     pthread_t rtu_proc;
     pthread_attr_t attr;
+    struct sockaddr_un name;
     struct sockaddr_in6 sin6;
     struct epoll_event ev;
-    struct epoll_event evs[1];
+    struct epoll_event evs[2];
     struct cfg *cfg;
-    static struct childs childs[CHILD_NUM+1];
+    static struct childs *childs;
 
     cfg = cfg_load("mbus.conf");
     if (!cfg) {
         return 1;
     }
 
+    if (unlink(cfg->sockfile) < 0 && errno != ENOENT) {
+        perror("unlink(sockfile) failed");
+        return 1;
+    }
+
     if ((sd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
-        perror("socket() failed");
+        perror("socket(AF_INET6) failed");
+        return 1;
+    }
+
+    if ((ud = socket(PF_LOCAL, SOCK_STREAM, 0)) < 0) {
+        perror("socket(PF_LOCAL) failed");
         return 1;
     }
 
@@ -723,22 +749,36 @@ int main(int argc, char **argv)
     }
 
     memset(&sin6, 0, sizeof(sin6));
+    memset(&name, 0, sizeof(name));
 
     sin6.sin6_family = AF_INET6;
     sin6.sin6_port = htons(MODBUS_TCP_PORT);
     sin6.sin6_addr = in6addr_any;
 
+    name.sun_family = AF_LOCAL;
+    strcpy(name.sun_path, cfg->sockfile);
+
     /* Bind to IPv6 */
     if (bind(sd, (struct sockaddr *)&sin6, sizeof(sin6)) < 0) {
-        perror("bind() failed");
+        perror("bind(sd) failed");
         return 1;
     }
     if (listen(sd, MAX_EVENTS >> 1) < 0) {
-        perror("listen() failed");
+        perror("listen(sd) failed");
         return 1;
     }
 
-    ep = epoll_create(1);
+    /* Bind to UNIX socket */
+    if (bind(ud, (struct sockaddr *)&name, SUN_LEN(&name)) < 0) {
+        perror("bind(ud) failed");
+        return 1;
+    }
+    if (listen(ud, MAX_EVENTS >> 1) < 0) {
+        perror("listen(ud) failed");
+        return 1;
+    }
+
+    ep = epoll_create(2);
     if (ep == -1) {
         perror("epoll_create() failed");
         return 1;
@@ -752,6 +792,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    ev.events = EPOLLIN | EPOLLERR;
+    ev.data.fd = ud;
+
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, ud, &ev) == -1) {
+        perror("epoll_ctl(ud) failed");
+        return 1;
+    }
+
     /* Pre-fork threads */
     pthread_rwlock_init(&rwlock, NULL);
 
@@ -762,7 +810,9 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    for (n = 0; n < CHILD_NUM; ++n) {
+    childs = malloc(sizeof(struct childs) * cfg->workers);
+
+    for (n = 0; n < cfg->workers; ++n) {
         pthread_attr_init(&attr);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
         childs[n].n = n;
@@ -788,29 +838,32 @@ int main(int argc, char **argv)
             continue;
         }
 
-        if (!(evs[0].events & EPOLLIN))
-            continue;
+        for (n = 0; n < nfds; ++n) {
+            if (!(evs[n].events & EPOLLIN))
+                continue;
 
-//        fprintf(stderr, "%d events=%d\n", nfds, evs[0].events);
+    //        fprintf(stderr, "%d events=%d\n", nfds, evs[0].events);
 
-        c = accept(sd, (struct sockaddr *)&local, &addrlen);
+            c = accept(evs[n].data.fd, (struct sockaddr *)&local, &addrlen);
 
-        if (setnonblocking(c) < 0) {
-            perror("setnonblocking()");
-            close(c);
-        } else {
-            ev.events = EPOLLIN;
-            ev.data.fd = c;
-//            fprintf(stderr, "%d Adding(%d) %d %d\n", ep, i, c, ((struct sockaddr_in6 *)&local)->sin6_port);
-            if (epoll_ctl(childs[cur_child++].ep, EPOLL_CTL_ADD, c, &ev) < 0) {
-                perror("epoll_ctl ADD()");
+            if (setnonblocking(c) < 0) {
+                perror("setnonblocking()");
                 close(c);
+            } else {
+                ev.events = EPOLLIN;
+                ev.data.fd = c;
+    //            fprintf(stderr, "%d Adding(%d) %d %d\n", ep, i, c, ((struct sockaddr_in6 *)&local)->sin6_port);
+                if (epoll_ctl(childs[cur_child++].ep, EPOLL_CTL_ADD, c, &ev) < 0) {
+                    perror("epoll_ctl ADD()");
+                    close(c);
+                }
+                cur_child %= cfg->workers;
             }
-            cur_child %= CHILD_NUM;
         }
     }
 
     pthread_rwlock_destroy(&rwlock);
+    close(ud);
     close(sd);
 
     return 0;
