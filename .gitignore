@@ -1,3 +1,4 @@
 *.o
 *~
 mbus-gw
+mbus-agent
