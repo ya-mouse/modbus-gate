@@ -5,6 +5,7 @@ LIBS = -lpthread -lyaml -g
 C_SRCS = \
 	aspp.c \
 	cfg.c \
+	rtu.c \
 	
 
 C_OBJS = $(C_SRCS:%.c=%.o)
@@ -25,4 +26,4 @@ mbus-agent: $(C_OBJS) mbus-agent.o
 	$(GCC) -o $@ $^ $(LIBS)
 
 clean:
-	rm -f $(C_OBJS) mbuw-gw mbus-agent
+	rm -f $(C_OBJS) mbus-gw.o mbus-agent.o mbuw-gw mbus-agent
