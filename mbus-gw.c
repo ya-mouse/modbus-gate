@@ -261,6 +261,7 @@ found:
         q.buf = malloc(len-4);
         q.len = len-4;
         memcpy(q.buf, buf+6, len-6);
+        q.buf[0] = mi->dst;
         crc = crc16(q.buf, len-6);
         memcpy(q.buf+q.len-2, &crc, 2);
         dump(q.buf, q.len);

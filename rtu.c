@@ -32,9 +32,21 @@ int setnonblocking(int sockfd)
 
 int rtu_open_serial(struct rtu_desc *rtu)
 {
+    int v = -1;
+    struct termios options;
+
     /* TODO: setup baud rate, bits and parity */
     printf("Opening (%s)\n", rtu->cfg.serial.devname);
     rtu->fd = open(rtu->cfg.serial.devname, O_RDWR | O_NONBLOCK);
+    if (rtu->fd != -1) {
+        tcgetattr(rtu->fd, &options);
+        options.c_cflag = rtu->cfg.serial.t.c_cflag;
+        tcsetattr(rtu->fd, TCSANOW, &options);
+        ioctl(rtu->fd, MOXA_GET_OP_MODE, &v);
+        printf("opmode=%d\n", v);
+        v = RS485_2WIRE_MODE;
+        ioctl(rtu->fd, MOXA_SET_OP_MODE, &v);
+    }
     printf("-> fd=%d\n", rtu->fd);
 
     return rtu->fd;
