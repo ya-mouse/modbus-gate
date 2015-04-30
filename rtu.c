@@ -33,7 +33,9 @@ int setnonblocking(int sockfd)
 int rtu_open_serial(struct rtu_desc *rtu)
 {
     /* TODO: setup baud rate, bits and parity */
+    printf("Opening (%s)\n", rtu->cfg.serial.devname);
     rtu->fd = open(rtu->cfg.serial.devname, O_RDWR | O_NONBLOCK);
+    printf("-> fd=%d\n", rtu->fd);
 
     return rtu->fd;
 }

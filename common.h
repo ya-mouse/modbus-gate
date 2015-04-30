@@ -100,4 +100,6 @@ struct workers {
     struct cfg *cfg;
 };
 
+extern u_int16_t crc16(const u_int8_t *data, int len);
+
 #endif /* _MBUS_COMMON__H */

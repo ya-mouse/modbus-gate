@@ -220,6 +220,18 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
     return p;
 }
 
+static void dump(const u_int8_t *buf, size_t len)
+{
+    int i;
+    for (i=1; i<=len; ++i) {
+        printf("%02x ", buf[i-1]);
+        if (!(i % 16))
+            printf("\n");
+    }
+    if ((i % 16))
+        printf("\n");
+}
+
 int queue_add(struct cfg *cfg,
               int slave_id, int fd, const u_int8_t *buf, size_t len)
 {
@@ -244,12 +256,21 @@ found:
 
     q.stamp = 0;
     q.resp_fd = fd;
-    q.buf = malloc(len);
-    q.len = len;
-    memcpy(q.buf, buf, len);
-
-    /* Fixup destination slave address */
-    q.buf[6] = mi->dst;
+    if (ri->type == RTU) {
+        u_int16_t crc;
+        q.buf = malloc(len-4);
+        q.len = len-4;
+        memcpy(q.buf, buf+6, len-6);
+        crc = crc16(q.buf, len-6);
+        memcpy(q.buf+q.len-2, &crc, 2);
+        dump(q.buf, q.len);
+    } else {
+        q.buf = malloc(len);
+        q.len = len;
+        memcpy(q.buf, buf, len);
+        /* Fixup destination slave address */
+        q.buf[6] = mi->dst;
+    }
 
     QADD(ri->q, q);
 
@@ -435,7 +456,8 @@ reconnect:
                         perror("write() failed");
                     }
                     } else {
-                        write(ri->fd, q->buf+6, q->len-6);
+                        write(ri->fd, q->buf, q->len);
+//                        write(ri->fd, q->buf+6, q->len-6);
                     }
                     DEBUGF("Write to RTU: %d l=%d\n", ri->fd, q->len);
 

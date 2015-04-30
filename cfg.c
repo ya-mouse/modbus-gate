@@ -202,6 +202,16 @@ static void cfg_parse_rtu(struct cfg *cfg)
                 }
             } else if (!strcmp(v, "map")) {
                 cfg_parse_map_list(cfg, &r);
+            } else if (!strcmp(v, "device")) {
+                if (!(v = cfg_get_string(cfg, NULL, &event)))
+                    break;
+
+                if (r.type == RTU) {
+                    r.cfg.serial.devname = strdup(v);
+                } else {
+                    cfg->err = INVALID_PARAM;
+                    fprintf(stderr, "Invalid param DEVICE for the RTU\n");
+                }
             } else if (!strcmp(v, "host")) {
                 if (!(v = cfg_get_string(cfg, NULL, &event)))
                     break;
