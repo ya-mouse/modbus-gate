@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <termios.h>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/un.h>
@@ -40,7 +41,17 @@ int rtu_open_serial(struct rtu_desc *rtu)
     rtu->fd = open(rtu->cfg.serial.devname, O_RDWR | O_NONBLOCK);
     if (rtu->fd != -1) {
         tcgetattr(rtu->fd, &options);
-        options.c_cflag = rtu->cfg.serial.t.c_cflag;
+        options.c_iflag = 0;
+        options.c_oflag &= ~OPOST;
+        options.c_lflag &= ~(ISIG | ICANON
+#ifdef XCASE
+                                  | XCASE
+#endif
+                            );
+        options.c_cflag &= ~(CSIZE | PARENB);
+        options.c_cflag |= rtu->cfg.serial.t.c_cflag;
+        options.c_cc[VMIN] = 1;
+        options.c_cc[VTIME] = 0;
         tcsetattr(rtu->fd, TCSANOW, &options);
         ioctl(rtu->fd, MOXA_GET_OP_MODE, &v);
         printf("opmode=%d\n", v);

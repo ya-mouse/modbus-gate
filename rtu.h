@@ -7,6 +7,7 @@
 
 #define RS232_MODE		0
 #define RS485_2WIRE_MODE	1
+#define RS485_4WIRE_MODE	3
 
 extern int setnonblocking(int sockfd);
 
