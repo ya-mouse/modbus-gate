@@ -1,4 +1,4 @@
-GCC  = $(CROSS_COMPILE)gcc -v
+GCC  = $(CROSS_COMPILE)gcc
 CFLAGS = -Wall -Wno-unused-result
 LIBS = -lpthread -lyaml -g
 
