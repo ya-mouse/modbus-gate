@@ -2,6 +2,7 @@
 #define _MBUS_COMMON__H 1
 
 #include <termios.h>
+#include <sys/time.h>
 #include "vect.h"
 
 //#undef DEBUG
@@ -93,6 +94,7 @@ struct rtu_desc {
     queue_list_v q;         /* queue list */
     struct cache_page *p;   /* cache pages */
     int16_t toread;      /* number of words (2-bytes) to read for RTU */
+    struct timeval tv;   /* last request/answer time */
 };
 
 typedef VECT(struct rtu_desc) rtu_desc_v;

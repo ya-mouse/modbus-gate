@@ -49,7 +49,7 @@ int rtu_open_serial(struct rtu_desc *rtu)
 #endif
                             );
         options.c_cflag &= ~(CSIZE | PARENB);
-        options.c_cflag |= rtu->cfg.serial.t.c_cflag;
+        options.c_cflag = rtu->cfg.serial.t.c_cflag;
         options.c_cc[VMIN] = 1;
         options.c_cc[VTIME] = 0;
         tcsetattr(rtu->fd, TCSANOW, &options);

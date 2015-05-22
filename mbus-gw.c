@@ -23,6 +23,7 @@
 #include "rtu.h"
 
 static pthread_rwlock_t rwlock;
+static struct cfg *global_cfg;
 
 struct rtu_desc *rtu_by_slaveid(struct cfg *cfg, int slave_id)
 {
@@ -177,7 +178,7 @@ update:
     }
     /* TODO: TTL have to be configured via config for each RTU / slave */
 //    q->stamp = 0;
-    p->ttd = time(NULL) + CACHE_TTL;
+    p->ttd = time(NULL) + global_cfg->ttl;
     pthread_rwlock_unlock(&rwlock);
 }
 
@@ -415,6 +416,9 @@ reconnect:
                     printf("...more: %d\n", ri->toread);
                     continue;
                 }
+
+                /* Update last serial activity timestamp */
+                gettimeofday(&ri->tv, NULL);
             }
 
             /* Update cache */
@@ -504,7 +508,10 @@ reconnect:
                         perror("write() failed");
                     }
                     } else if (ri->type == RTU) {
-                        if (ri->toread <= 0) {
+                        struct timeval tv;
+                        gettimeofday(&tv, NULL);
+
+                        if (ri->toread <= 0 && ((tv.tv_sec - ri->tv.tv_sec) > 0 || (tv.tv_usec - ri->tv.tv_usec) > 200000)) {
                             write(ri->fd, q->buf, q->len);
                             ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
                             printf("toread: %d\n", ri->toread);
@@ -601,7 +608,7 @@ int main(int argc, char **argv)
     struct cfg *cfg;
     static struct workers *workers;
 
-    cfg = cfg_load("mbus.conf");
+    global_cfg = cfg = cfg_load("mbus.conf");
     if (!cfg) {
         return 1;
     }
