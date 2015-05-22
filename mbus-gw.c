@@ -73,9 +73,12 @@ void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
     struct cache_page *p;
     struct cache_page *new;
 
-    if (!rtu || !QLEN(rtu->q))
+    if (!rtu || !QLEN(rtu->q)) {
+        printf("rtu=%p qlen=%d\n", rtu, (rtu ? QLEN(rtu->q) : -1));
         return;
+    }
 
+    printf("update_cache\n");
     pthread_rwlock_wrlock(&rwlock);
     /* TODO: Write (change register) request shouldn't be cached */
     /* Check for function type */
@@ -83,10 +86,17 @@ void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
 
     q = &QGET(rtu->q, 0);
     /* TODO: handle different RTU types */
-    slave = q->buf[6];
-    func = q->buf[7];
-    addr = (q->buf[8] << 8) | q->buf[9];
-    nb = (q->buf[10] << 8) | q->buf[11];
+    if (rtu->type == TCP) {
+        slave = q->buf[6];
+        func = q->buf[7];
+        addr = (q->buf[8] << 8) | q->buf[9];
+        nb = (q->buf[10] << 8) | q->buf[11];
+    } else if (rtu->type == RTU) {
+        slave = q->buf[0];
+        func = q->buf[1];
+        addr = (q->buf[2] << 8) | q->buf[3];
+        nb = (q->buf[4] << 8) | q->buf[5];
+    }
 
 #ifdef DEBUG
     printf("-- ");
@@ -159,8 +169,14 @@ fill:
     p->len = len;
 
 update:
-    memcpy(p->buf, buf, len);
+    if (rtu->type == TCP) {
+        memcpy(p->buf, buf, len);
+    } else if (rtu->type == RTU) {
+        /* Remove CRC */
+        memcpy(p->buf, buf, len-2);
+    }
     /* TODO: TTL have to be configured via config for each RTU / slave */
+//    q->stamp = 0;
     p->ttd = time(NULL) + CACHE_TTL;
     pthread_rwlock_unlock(&rwlock);
 }
@@ -202,12 +218,19 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
     /* TODO: Write (change register) request shouldn't be cached */
 
     p = rtu->p;
-    slave = q->buf[6];
-    func = q->buf[7];
-    addr = (q->buf[8] << 8) | q->buf[9];
-    nb = (q->buf[10] << 8) | q->buf[11];
+    if (rtu->type == TCP) {
+        slave = q->buf[6];
+        func = q->buf[7];
+        addr = (q->buf[8] << 8) | q->buf[9];
+        nb = (q->buf[10] << 8) | q->buf[11];
+    } else if (rtu->type == RTU) {
+        slave = q->buf[0];
+        func = q->buf[1];
+        addr = (q->buf[2] << 8) | q->buf[3];
+        nb = (q->buf[4] << 8) | q->buf[5];
+    }
 
-//    DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
+    //DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
 
     while (p) {
         DEBUGF("--> (%d,%d,%d) <> (%d,%d,%d)\n",
@@ -262,12 +285,14 @@ found:
         q.len = len-4;
         memcpy(q.buf, buf+6, len-6);
         q.buf[0] = mi->dst;
+        q.src = mi->src;
         crc = crc16(q.buf, len-6);
         memcpy(q.buf+q.len-2, &crc, 2);
         dump(q.buf, q.len);
     } else {
         q.buf = malloc(len);
         q.len = len;
+        q.src = mi->src;
         memcpy(q.buf, buf, len);
         /* Fixup destination slave address */
         q.buf[6] = mi->dst;
@@ -374,13 +399,22 @@ reconnect:
                 rtu_open(ri, ep);
                 continue;
             }
-            DEBUGF("Read %d from %d\n", len, evs[n].data.fd);
+            DEBUGF(">>> Read %d from #%d\n", len, evs[n].data.fd);
+            dump(buf, len);
 
             /* Process RealCOM command */
             if (ri->type == REALCOM && ri->fd != evs[n].data.fd) {
-                printf("Process CMD %d (%d,%d)\n", len, ri->fd, evs[n].data.fd);
+                printf("Process CMD %d (#%d,#%d)\n", len, ri->fd, evs[n].data.fd);
                 realcom_process_cmd(ri, buf, len);
                 continue;
+            }
+
+            if (ri->type == RTU) {
+                ri->toread -= len;
+                if (ri->toread > 0) {
+                    printf("...more: %d\n", ri->toread);
+                    continue;
+                }
             }
 
             /* Update cache */
@@ -418,6 +452,7 @@ reconnect:
                     // build response with TIMEOUT error message
                     DEBUGF("Remove from queue: %d\n", q->buf[6]);
                     write(q->resp_fd, "\x00\x01\x00\x00\x00\x02\x01\x83", 8);
+                    ri->toread = 0;
                     _queue_pop(ri);
                     n--;
                     continue;
@@ -427,16 +462,28 @@ reconnect:
                     if (p) {
                         DEBUGF("Found, respond to %d len=%d\n",
                                q->resp_fd, p->len);
+                        if (ri->type == TCP) {
 #if 1
-                        /* Revert TID back */
-                        p->buf[0] = ri->tido[0];
-                        p->buf[1] = ri->tido[1];
+                            /* Revert TID back */
+                            p->buf[0] = ri->tido[0];
+                            p->buf[1] = ri->tido[1];
 #endif
-                        write(q->resp_fd, p->buf, p->len);
+                            write(q->resp_fd, p->buf, p->len);
+                        } else if (ri->type == RTU) {
+                            uint8_t tcp[520];
+                            tcp[0] = ri->tido[0];
+                            tcp[1] = ri->tido[1];
+                            tcp[2] = tcp[3] = 0;
+                            tcp[4] = (p->len >> 8) & 0xff;
+                            tcp[5] = p->len & 0xff;
+                            memcpy(tcp+6, p->buf, p->len-2);
+                            write(q->resp_fd, tcp, p->len + 4);
+                        }
                         _queue_pop(ri);
                         n--;
                         continue;
                     } else if (q->stamp) {
+//                        printf("stamp!\n");
                         break;
                     }
 
@@ -456,13 +503,20 @@ reconnect:
                     if (write(ri->fd, q->buf, q->len) != q->len) {
                         perror("write() failed");
                     }
-                    } else {
-                        write(ri->fd, q->buf, q->len);
+                    } else if (ri->type == RTU) {
+                        if (ri->toread <= 0) {
+                            write(ri->fd, q->buf, q->len);
+                            ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
+                            printf("toread: %d\n", ri->toread);
+                        } else {
+                            printf("toread==%d\n", ri->toread);
+                            continue;
+                        }
 //                        write(ri->fd, q->buf+6, q->len-6);
                     }
                     DEBUGF("Write to RTU: %d l=%d\n", ri->fd, q->len);
 
-                    q->stamp = time(NULL) + RTU_TIMEOUT;
+                    q->stamp = time(NULL) + ri->timeout;
                     break;
                 }
             }
