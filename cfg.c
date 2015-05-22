@@ -230,6 +230,9 @@ static void cfg_parse_rtu(struct cfg *cfg)
                     cfg->err = INVALID_PARAM;
                     fprintf(stderr, "Invalid param PORT for the RTU\n");
                 }
+            } else if (!strcmp(v, "timeout")) {
+                iv = cfg_get_int(cfg, -1);
+                r.timeout = iv;
             } else if (!strcmp(v, "baud")) {
                 if (!(v = cfg_get_string(cfg, NULL, &event)))
                     break;
@@ -254,6 +257,9 @@ static void cfg_parse_rtu(struct cfg *cfg)
                 }
                 r.cfg.realcom.cmdport = 16 + r.cfg.realcom.port;
             }
+            if (r.timeout == 0) {
+                r.timeout = RTU_TIMEOUT;
+            }
             VADD(cfg->rtu_list, r);
 
 out:
@@ -266,7 +272,7 @@ out:
             break;
         }
         yaml_event_delete(&event);
-    }    
+    }
 }
 
 static void cfg_parse_rtu_list(struct cfg *cfg)

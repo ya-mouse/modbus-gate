@@ -1,6 +1,7 @@
 #ifndef _MBUS_COMMON__H
 #define _MBUS_COMMON__H 1
 
+#include <termios.h>
 #include "vect.h"
 
 //#undef DEBUG
@@ -43,6 +44,7 @@ struct queue_list {
     u_int8_t *buf;          /* request buffer */
     size_t len;             /* request length */
     time_t stamp;           /* timestamp of timeout: last_timestamp + timeout */
+    int16_t src;            /* source slave_id */
 };
 
 typedef QUEUE(struct queue_list) queue_list_v;
@@ -57,6 +59,7 @@ typedef VECT(struct slave_map) slave_map_v;
 struct rtu_desc {
     int fd;                 /* ttySx descriptior */
     int retries;            /* number of retries */
+    long timeout;           /* timeout in seconds */
     enum rtu_type type;     /* endpoint RTU device type */
     u_int16_t tid;
     slave_map_v slave_id;   /* slave_id configured for MODBUS-TCP */
@@ -74,13 +77,13 @@ struct rtu_desc {
             RTU_CFG_COMMON;
             int cmdport;
             int cmdfd;
-            struct termio t;
+            struct termios t;
             int flags;
             int modem_control;
         } realcom;
         struct {
             char *devname;  /* serial device name */
-            struct termio t;
+            struct termios t;
         } serial;
 #undef RTU_CFG_COMMON
     } cfg;
@@ -89,6 +92,7 @@ struct rtu_desc {
     u_int8_t tido[2];
     queue_list_v q;         /* queue list */
     struct cache_page *p;   /* cache pages */
+    int16_t toread;      /* number of words (2-bytes) to read for RTU */
 };
 
 typedef VECT(struct rtu_desc) rtu_desc_v;
