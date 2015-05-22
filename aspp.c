@@ -1,4 +1,6 @@
+#include <termios.h>
 #include <unistd.h>
+#include <linux/serial.h>
 #include <linux/serial_reg.h>
 
 #include "mbus-gw.h"
