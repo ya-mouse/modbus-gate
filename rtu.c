@@ -49,6 +49,8 @@ int rtu_open_serial(struct rtu_desc *rtu)
 #endif
                             );
         options.c_cflag &= ~(CSIZE | PARENB);
+        if (rtu->cfg.serial.t.c_cflag == 0)
+            rtu->cfg.serial.t.c_cflag = CS8 | rtu->conf->baud;
         options.c_cflag = rtu->cfg.serial.t.c_cflag;
         options.c_cc[VMIN] = 1;
         options.c_cc[VTIME] = 0;

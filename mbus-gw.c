@@ -23,7 +23,6 @@
 #include "rtu.h"
 
 static pthread_rwlock_t rwlock;
-static struct cfg *global_cfg;
 
 struct rtu_desc *rtu_by_slaveid(struct cfg *cfg, int slave_id)
 {
@@ -65,21 +64,21 @@ out:
 
 void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
 {
-    int slave;
-    int func;
-    int addr;
-    int nb;
+    int slave = 0;
+    int func = 0;
+    int addr = 0;
+    int nb = 0;
     int i;
     struct queue_list *q;
     struct cache_page *p;
     struct cache_page *new;
 
     if (!rtu || !QLEN(rtu->q)) {
-        printf("rtu=%p qlen=%d\n", rtu, (rtu ? QLEN(rtu->q) : -1));
+        DEBUGF("rtu=%p qlen=%d\n", rtu, (rtu ? QLEN(rtu->q) : -1));
         return;
     }
 
-    printf("update_cache\n");
+    DEBUGF("update_cache\n");
     pthread_rwlock_wrlock(&rwlock);
     /* TODO: Write (change register) request shouldn't be cached */
     /* Check for function type */
@@ -178,7 +177,7 @@ update:
     }
     /* TODO: TTL have to be configured via config for each RTU / slave */
 //    q->stamp = 0;
-    p->ttd = time(NULL) + global_cfg->ttl;
+    p->ttd = time(NULL) + rtu->conf->ttl;
     pthread_rwlock_unlock(&rwlock);
 }
 
@@ -189,7 +188,7 @@ inline struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
     if (!rtu || !p)
         return NULL;
 
-//    printf("free: %p ", p);
+//    DEBUGF("free: %p ", p);
     free(p->buf);
     if (!p->prev) {
         rtu->p = p->next;
@@ -201,16 +200,16 @@ inline struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
     next = p->next;
     free(p);
 
-//    printf(" n=%p\n", next);
+//    DEBUGF(" n=%p\n", next);
     return next;
 }
 
 struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
 {
-    int slave;
-    int addr;
-    int func;
-    int nb;
+    int slave = 0;
+    int addr = 0;
+    int func = 0;
+    int nb = 0;
     struct cache_page *p;
 
     if (!rtu)
@@ -246,6 +245,7 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
 
 static void dump(const u_int8_t *buf, size_t len)
 {
+#ifdef DEBUG
     int i;
     for (i=1; i<=len; ++i) {
         printf("%02x ", buf[i-1]);
@@ -254,6 +254,7 @@ static void dump(const u_int8_t *buf, size_t len)
     }
     if ((i % 16))
         printf("\n");
+#endif
 }
 
 int queue_add(struct cfg *cfg,
@@ -338,6 +339,7 @@ void *rtu_thread(void *arg)
     evs = malloc(sizeof(struct epoll_event) * VLEN(cfg->rtu_list));
 
     VFOREACH(cfg->rtu_list, ri) {
+        ri->conf = cfg;
         rtu_open(ri, ep);
     }
 
@@ -405,7 +407,7 @@ reconnect:
 
             /* Process RealCOM command */
             if (ri->type == REALCOM && ri->fd != evs[n].data.fd) {
-                printf("Process CMD %d (#%d,#%d)\n", len, ri->fd, evs[n].data.fd);
+                DEBUGF("Process CMD %d (#%d,#%d)\n", len, ri->fd, evs[n].data.fd);
                 realcom_process_cmd(ri, buf, len);
                 continue;
             }
@@ -413,7 +415,7 @@ reconnect:
             if (ri->type == RTU) {
                 ri->toread -= len;
                 if (ri->toread > 0) {
-                    printf("...more: %d\n", ri->toread);
+                    DEBUGF("...more: %d\n", ri->toread);
                     continue;
                 }
 
@@ -487,7 +489,6 @@ reconnect:
                         n--;
                         continue;
                     } else if (q->stamp) {
-//                        printf("stamp!\n");
                         break;
                     }
 
@@ -514,9 +515,9 @@ reconnect:
                         if (ri->toread <= 0 && ((tv.tv_sec - ri->tv.tv_sec) > 0 || (tv.tv_usec - ri->tv.tv_usec) > 200000)) {
                             write(ri->fd, q->buf, q->len);
                             ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
-                            printf("toread: %d\n", ri->toread);
+                            DEBUGF("toread: %d\n", ri->toread);
                         } else {
-                            printf("toread==%d\n", ri->toread);
+                            DEBUGF("toread==%d\n", ri->toread);
                             continue;
                         }
 //                        write(ri->fd, q->buf+6, q->len-6);
@@ -527,7 +528,7 @@ reconnect:
                     break;
                 }
             }
-//            printf("slave_id=%d queue=%d\n", ri->slave_id, i);
+//            DEBUGF("slave_id=%d queue=%d\n", ri->slave_id, i);
         }
         pthread_rwlock_unlock(&rwlock);
     }
@@ -608,7 +609,7 @@ int main(int argc, char **argv)
     struct cfg *cfg;
     static struct workers *workers;
 
-    global_cfg = cfg = cfg_load("mbus.conf");
+    cfg = cfg_load("mbus.conf");
     if (!cfg) {
         return 1;
     }

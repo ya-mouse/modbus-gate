@@ -19,6 +19,7 @@ enum err {
 
 struct cfg {
     int ttl;
+    int baud;
     int workers;
     char *sockfile;
     rtu_desc_v rtu_list;

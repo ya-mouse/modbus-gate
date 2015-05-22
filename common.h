@@ -5,8 +5,8 @@
 #include <sys/time.h>
 #include "vect.h"
 
-//#undef DEBUG
-#define DEBUG
+#undef DEBUG
+//#define DEBUG
 #ifdef DEBUG
 #define DEBUGF(x...) printf(x)
 #else
@@ -61,6 +61,7 @@ struct rtu_desc {
     int fd;                 /* ttySx descriptior */
     int retries;            /* number of retries */
     long timeout;           /* timeout in seconds */
+    int baud;               /* global baud rate */
     enum rtu_type type;     /* endpoint RTU device type */
     u_int16_t tid;
     slave_map_v slave_id;   /* slave_id configured for MODBUS-TCP */
@@ -95,6 +96,7 @@ struct rtu_desc {
     struct cache_page *p;   /* cache pages */
     int16_t toread;      /* number of words (2-bytes) to read for RTU */
     struct timeval tv;   /* last request/answer time */
+    struct cfg *conf;
 };
 
 typedef VECT(struct rtu_desc) rtu_desc_v;

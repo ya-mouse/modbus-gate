@@ -13,6 +13,26 @@
             v = val;                                        \
     }
 
+static int get_speed(const char *baud, int defval)
+{
+    int spd;
+
+    if (!strcmp(baud, "9600"))
+        spd = B9600;
+    else if (!strcmp(baud, "19200"))
+        spd = B19200;
+    else if (!strcmp(baud, "38400"))
+        spd = B38400;
+    else if (!strcmp(baud, "57600"))
+        spd = B57600;
+    else if (!strcmp(baud, "115200"))
+        spd = B115200;
+    else
+        spd = defval;
+
+    return spd;
+}
+
 static void cfg_expect_event(struct cfg *cfg, const enum yaml_event_type_e type)
 {
     yaml_event_t event;
@@ -234,13 +254,17 @@ static void cfg_parse_rtu(struct cfg *cfg)
                 iv = cfg_get_int(cfg, -1);
                 r.timeout = iv;
             } else if (!strcmp(v, "baud")) {
+                int spd;
+
                 if (!(v = cfg_get_string(cfg, NULL, &event)))
                     break;
 
+                spd = get_speed(v, B9600);
+
                 if (r.type == REALCOM) {
-                    r.cfg.realcom.t.c_cflag = CS8 | B9600;
+                    r.cfg.realcom.t.c_cflag = CS8 | spd;
                 } else if (r.type == RTU) {
-                    r.cfg.serial.t.c_cflag = CS8 | B9600;
+                    r.cfg.serial.t.c_cflag = CS8 | spd;
                 } else {
                     cfg->err = INVALID_PARAM;
                     fprintf(stderr, "Invalid param BAUD for the RTU\n");
@@ -334,6 +358,10 @@ static void cfg_parse_first_layer(struct cfg *cfg)
                 cfg->sockfile = strdup(v);
             } else if (!strcmp(v, "rtu")) {
                 cfg_parse_rtu_list(cfg);
+            } else if (!strcmp(v, "baud")) {
+                if (!(v = cfg_get_string(cfg, NULL, &event)))
+                    break;
+                cfg->baud = get_speed(v, B9600);
             }
             break;
 
