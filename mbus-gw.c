@@ -487,10 +487,11 @@ reconnect:
                             tcp[0] = ri->tido[0];
                             tcp[1] = ri->tido[1];
                             tcp[2] = tcp[3] = 0;
-                            tcp[4] = (p->len >> 8) & 0xff;
-                            tcp[5] = p->len & 0xff;
+                            tcp[4] = ((p->len-2) >> 8) & 0xff;
+                            tcp[5] = (p->len-2) & 0xff;
                             memcpy(tcp+6, p->buf, p->len-2);
                             write(q->resp_fd, tcp, p->len + 4);
+                            dump(tcp, p->len + 4);
                         }
                         _queue_pop(ri);
                         n--;
