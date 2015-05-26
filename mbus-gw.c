@@ -114,10 +114,12 @@ void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
 #endif
 
     /* TODO: Check for Query TID and Response TID */
-    if (q->buf[0] != buf[0] || q->buf[1] != buf[1]) {
-        DEBUGF(">>> Wrong ordered response: %d expected %d\n",
-               (buf[0] << 8) | buf[1], (q->buf[0] << 8) | q->buf[1]);
-        return;
+    if (rtu->type == TCP) {
+        if (q->buf[0] != buf[0] || q->buf[1] != buf[1]) {
+            DEBUGF(">>> Wrong ordered response: %d expected %d\n",
+                   (buf[0] << 8) | buf[1], (q->buf[0] << 8) | q->buf[1]);
+            return;
+        }
     }
 
     /* For error response do not cache the answer, just write it back */
@@ -413,7 +415,12 @@ reconnect:
             }
 
             if (ri->type == RTU) {
-                ri->toread -= len;
+                if ((buf[1] & 0xf0) == 0x80) {
+                    DEBUGF("...exception: %02x\n", buf[1]);
+                    ri->toread = 0;
+                } else {
+                    ri->toread -= len;
+                }
                 if (ri->toread > 0) {
                     DEBUGF("...more: %d\n", ri->toread);
                     continue;
@@ -514,7 +521,12 @@ reconnect:
 
                         if (ri->toread <= 0 && ((tv.tv_sec - ri->tv.tv_sec) > 0 || (tv.tv_usec - ri->tv.tv_usec) > 200000)) {
                             write(ri->fd, q->buf, q->len);
-                            ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
+                            // status register
+                            if (q->buf[1] == 1) {
+                                ri->toread = 6;
+                            } else {
+                                ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
+                            }
                             DEBUGF("toread: %d\n", ri->toread);
                         } else {
                             DEBUGF("toread==%d\n", ri->toread);
@@ -739,7 +751,7 @@ int main(int argc, char **argv)
             } else {
                 ev.events = EPOLLIN;
                 ev.data.fd = c;
-    //            fprintf(stderr, "%d Adding(%d) %d %d\n", ep, i, c, ((struct sockaddr_in6 *)&local)->sin6_port);
+//                fprintf(stderr, "%d Adding() %d %d\n", ep, c, ((struct sockaddr_in6 *)&local)->sin6_port);
                 if (epoll_ctl(workers[cur_child++].ep, EPOLL_CTL_ADD, c, &ev) < 0) {
                     perror("epoll_ctl ADD()");
                     close(c);
