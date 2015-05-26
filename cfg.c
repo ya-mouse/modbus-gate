@@ -43,7 +43,7 @@ static void cfg_expect_event(struct cfg *cfg, const enum yaml_event_type_e type)
     yaml_parser_parse(&cfg->parser, &event);
     if (event.type != type) {
         cfg->err = PARSER_SYNTAX;
-        printf("Syntax error\n");
+        fprintf(stderr, "Syntax error\n");
     }
     yaml_event_delete(&event);
 }
@@ -128,7 +128,7 @@ static void cfg_parse_map(struct cfg *cfg, struct rtu_desc *r)
 
         default:
             cfg->err = PARSER_SYNTAX;
-            printf("Unknown elem %d\n", event.type);
+            fprintf(stderr, "Unknown elem %d\n", event.type);
             break;
         }
         yaml_event_delete(&event);
@@ -163,7 +163,7 @@ static void cfg_parse_map_list(struct cfg *cfg, struct rtu_desc *r)
 
         default:
             cfg->err = PARSER_SYNTAX;
-            printf("Unknown elem %d\n", event.type);
+            fprintf(stderr, "Unknown elem %d\n", event.type);
             break;
         }
         yaml_event_delete(&event);
@@ -192,7 +192,6 @@ static void cfg_parse_rtu(struct cfg *cfg)
         switch (event.type) {
         case YAML_SCALAR_EVENT:
             v = (char *)event.data.scalar.value;
-            printf("rtu scalar %s\n", v);
             if (!strcmp(v, "type")) {
                 if (!(v = cfg_get_string(cfg, NULL, &event)))
                     break;
@@ -205,8 +204,6 @@ static void cfg_parse_rtu(struct cfg *cfg)
 
                 if (!strcasecmp(v, "modbus-rtu")) {
                     r.type = RTU;
-                    /* TODO: make default serial settings tuneable from config */
-                    r.cfg.serial.t.c_cflag = CS8 | B9600;
                 } else if (!strcasecmp(v, "modbus-tcp")) {
                     r.type = TCP;
                     r.cfg.tcp.port = 502;
@@ -286,13 +283,15 @@ static void cfg_parse_rtu(struct cfg *cfg)
             }
             VADD(cfg->rtu_list, r);
 
+            memset(&r, 0, sizeof(struct rtu_desc));
+
 out:
             yaml_event_delete(&event);
             return;
 
         default:
             cfg->err = PARSER_SYNTAX;
-            printf("Unknown elem %d\n", event.type);
+            fprintf(stderr, "Unknown elem %d\n", event.type);
             break;
         }
         yaml_event_delete(&event);
@@ -326,7 +325,7 @@ static void cfg_parse_rtu_list(struct cfg *cfg)
 
         default:
             cfg->err = PARSER_SYNTAX;
-            printf("Unknown elem %d\n", event.type);
+            fprintf(stderr, "Unknown elem %d\n", event.type);
             break;
         }
         yaml_event_delete(&event);
@@ -347,7 +346,6 @@ static void cfg_parse_first_layer(struct cfg *cfg)
         switch (event.type) {
         case YAML_SCALAR_EVENT:
             v = (char *)event.data.scalar.value;
-            printf("scalar %s\n", v);
             if (!strcmp(v, "ttl")) {
                 cfg->ttl = cfg_get_int(cfg, CFG_DEFAULT_TTL);
             } else if (!strcmp(v, "workers")) {
@@ -372,7 +370,7 @@ static void cfg_parse_first_layer(struct cfg *cfg)
         default:
             // Syntax error
             cfg->err = PARSER_SYNTAX;
-            printf("first_layer: Unknown elem %d\n", event.type);
+            fprintf(stderr, "first_layer: Unknown elem %d\n", event.type);
             break;
         }
 
