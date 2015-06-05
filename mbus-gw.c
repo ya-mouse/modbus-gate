@@ -236,7 +236,7 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
 
     while (p) {
         DEBUGF("--> (%d,%d,%d) <> (%d,%d,%d)\n",
-               func, slave, addr, p->function, p->slaveid, p->addr);
+               slave, func, addr, p->slaveid, p->function, p->addr);
         if (func == p->function && slave == p->slaveid && addr == p->addr)
             return p;
         p = p->next;
@@ -279,14 +279,19 @@ int queue_add(struct cfg *cfg,
     return -2;
 
 found:
-    DEBUGF("Adding sid=%d to queue len=%d fd=%d\n", slave_id, len, fd);
+    DEBUGF("Adding sid=%d to queue len=%d fd=#%d\n", slave_id, len, fd);
 
     q.stamp = 0;
     q.resp_fd = fd;
+    DEBUGF("=== orig === %d\n", fd);
+    dump(buf, len);
+    DEBUGF("=== added === %d\n", fd);
     if (ri->type == RTU) {
         u_int16_t crc;
         q.buf = malloc(len-4);
         q.len = len-4;
+        q.tido[0] = buf[0];
+        q.tido[1] = buf[1];
         memcpy(q.buf, buf+6, len-6);
         q.buf[0] = mi->dst;
         q.src = mi->src;
@@ -398,13 +403,13 @@ void *rtu_thread(void *arg)
 reconnect:
                 /* TODO: reset "retries" counters after a delay */
                 /* Re-open required */
-                fprintf(stderr, "Read failed (%d), trying to re-open %d\n",
+                fprintf(stderr, "Read failed (%d), trying to re-open #%d\n",
                         errno, ri->fd);
                 rtu_close(ri, ep);
                 rtu_open(ri, ep);
                 continue;
             }
-            DEBUGF(">>> Read %d from #%d\n", len, evs[n].data.fd);
+            DEBUGF(">>> Read %d bytes from #%d\n", len, evs[n].data.fd);
             dump(buf, len);
 
             /* Process RealCOM command */
@@ -416,13 +421,13 @@ reconnect:
 
             if (ri->type == RTU) {
                 if ((buf[1] & 0xf0) == 0x80) {
-                    DEBUGF("...exception: %02x\n", buf[1]);
+                    DEBUGF("...exception(#%d): %02x\n", ri->fd, buf[1]);
                     ri->toread = 0;
                 } else {
                     ri->toread -= len;
                 }
                 if (ri->toread > 0) {
-                    DEBUGF("...more: %d\n", ri->toread);
+                    DEBUGF("...more(#%d): %d\n", ri->fd, ri->toread);
                     continue;
                 }
 
@@ -473,7 +478,7 @@ reconnect:
                     /* Check for cache page */
                     p = _cache_find(ri, q);
                     if (p) {
-                        DEBUGF("Found, respond to %d len=%d\n",
+                        DEBUGF("Found, respond to #%d len=%d\n",
                                q->resp_fd, p->len);
                         if (ri->type == TCP) {
 #if 1
@@ -484,12 +489,13 @@ reconnect:
                             write(q->resp_fd, p->buf, p->len);
                         } else if (ri->type == RTU) {
                             uint8_t tcp[520];
-                            tcp[0] = ri->tido[0];
-                            tcp[1] = ri->tido[1];
+                            tcp[0] = q->tido[0];
+                            tcp[1] = q->tido[1];
                             tcp[2] = tcp[3] = 0;
                             tcp[4] = ((p->len-2) >> 8) & 0xff;
                             tcp[5] = (p->len-2) & 0xff;
-                            memcpy(tcp+6, p->buf, p->len-2);
+                            tcp[6] = q->src;
+                            memcpy(tcp+7, p->buf+1, p->len-3);
                             write(q->resp_fd, tcp, p->len + 4);
                             dump(tcp, p->len + 4);
                         }
@@ -528,14 +534,14 @@ reconnect:
                             } else {
                                 ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
                             }
-                            DEBUGF("toread: %d\n", ri->toread);
+                            DEBUGF("toread(#%d): %d\n", ri->fd, ri->toread);
                         } else {
-                            DEBUGF("toread==%d\n", ri->toread);
+                            DEBUGF("toread(#%d)==%d\n", ri->fd, ri->toread);
                             continue;
                         }
 //                        write(ri->fd, q->buf+6, q->len-6);
                     }
-                    DEBUGF("Write to RTU: %d l=%d\n", ri->fd, q->len);
+                    DEBUGF("Write to RTU: #%d l=%d\n", ri->fd, q->len);
 
                     q->stamp = time(NULL) + ri->timeout;
                     break;

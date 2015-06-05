@@ -5,8 +5,8 @@
 #include <sys/time.h>
 #include "vect.h"
 
-#undef DEBUG
-//#define DEBUG
+//#undef DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define DEBUGF(x...) printf(x)
 #else
@@ -46,6 +46,7 @@ struct queue_list {
     size_t len;             /* request length */
     time_t stamp;           /* timestamp of timeout: last_timestamp + timeout */
     int16_t src;            /* source slave_id */
+    u_int8_t tido[2];
 };
 
 typedef QUEUE(struct queue_list) queue_list_v;
