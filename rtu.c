@@ -267,7 +267,7 @@ int rtu_open(struct rtu_desc *rtu, int ep)
 
 void rtu_close(struct rtu_desc *rtu, int ep)
 {
-    if (rtu->fd) {
+    if (rtu->fd > 0) {
         epoll_ctl(ep, EPOLL_CTL_DEL, rtu->fd, NULL);
         close(rtu->fd);
     }

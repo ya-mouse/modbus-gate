@@ -5,8 +5,8 @@
 #include <sys/time.h>
 #include "vect.h"
 
-//#undef DEBUG
-#define DEBUG
+#undef DEBUG
+//#define DEBUG
 #ifdef DEBUG
 #define DEBUGF(x...) printf(x)
 #else

@@ -581,8 +581,13 @@ void *tcp_thread(void *p)
 
         for (n = 0; n < nfds; ++n) {
             int len;
-            if (!(evs[n].events & EPOLLIN))
+            if (!(evs[n].events & EPOLLIN)) {
+                if (evs[n].events & EPOLLHUP) {
+                    /* TODO: dealloc RTU by fd */
+                    close(evs[n].data.fd);
+                }
                 continue;
+            }
 
             len = read(evs[n].data.fd, buf, BUF_SIZE);
             if (len == 0) {
@@ -605,7 +610,7 @@ void *tcp_thread(void *p)
         } 
     }
 
-err: 
+err:
     close(self->ep);
 
     return NULL;
@@ -615,6 +620,7 @@ int main(int argc, char **argv)
 {
     int c;
     int n;
+    int rc;
     int sd;
     int ud;
     int ep;
@@ -737,7 +743,7 @@ int main(int argc, char **argv)
         nfds = epoll_wait(ep, evs, 1, -1);
         if (nfds == -1) {
             if (errno == EINTR)
-                continue;            
+                continue;
             perror("epoll_wait(main) failed");
             return 2;
         } else if (nfds == 0) {
@@ -751,6 +757,13 @@ int main(int argc, char **argv)
     //        fprintf(stderr, "%d events=%d\n", nfds, evs[0].events);
 
             c = accept(evs[n].data.fd, (struct sockaddr *)&local, &addrlen);
+
+            if (c < 0) {
+                perror("accept()");
+                /* HACK: unable to accept more incoming connections */
+                rc = -1;
+                goto die;
+            }
 
             if (setnonblocking(c) < 0) {
                 perror("setnonblocking()");
@@ -768,6 +781,8 @@ int main(int argc, char **argv)
         }
     }
 
+    rc = 0;
+die:
     pthread_rwlock_destroy(&rwlock);
     close(ud);
     close(sd);
