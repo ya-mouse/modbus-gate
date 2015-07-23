@@ -469,7 +469,8 @@ reconnect:
                 if (q->stamp && q->stamp <= cur_time) {
                     // build response with TIMEOUT error message
                     DEBUGF("Remove from queue: %d\n", q->buf[6]);
-                    write(q->resp_fd, "\x00\x01\x00\x00\x00\x02\x01\x83", 8);
+                    if (q->resp_fd >= 0)
+                        write(q->resp_fd, "\x00\x01\x00\x00\x00\x02\x01\x83", 8);
                     ri->toread = 0;
                     _queue_pop(ri);
                     n--;
@@ -486,7 +487,8 @@ reconnect:
                             p->buf[0] = ri->tido[0];
                             p->buf[1] = ri->tido[1];
 #endif
-                            write(q->resp_fd, p->buf, p->len);
+                            if (q->resp_fd >= 0)
+                                write(q->resp_fd, p->buf, p->len);
                         } else if (ri->type == RTU) {
                             uint8_t tcp[520];
                             tcp[0] = q->tido[0];
@@ -496,7 +498,8 @@ reconnect:
                             tcp[5] = (p->len-2) & 0xff;
                             tcp[6] = q->src;
                             memcpy(tcp+7, p->buf+1, p->len-3);
-                            write(q->resp_fd, tcp, p->len + 4);
+                            if (q->resp_fd >= 0)
+                                write(q->resp_fd, tcp, p->len + 4);
                             dump(tcp, p->len + 4);
                         }
                         _queue_pop(ri);
@@ -529,7 +532,7 @@ reconnect:
                         if (ri->toread <= 0 && ((tv.tv_sec - ri->tv.tv_sec) > 0 || (tv.tv_usec - ri->tv.tv_usec) > 200000)) {
                             write(ri->fd, q->buf, q->len);
                             // status register
-                            if (q->buf[1] == 1) {
+                            if (q->buf[1] == 1 || q->buf[1] == 2) {
                                 ri->toread = 6;
                             } else {
                                 ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
