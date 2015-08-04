@@ -8,7 +8,7 @@
 
 int realcom_init(struct rtu_desc *rtu)
 {
-    u_int8_t cmd[10];
+    uint8_t cmd[10];
     char baud;
     int mode;
 
@@ -188,11 +188,11 @@ int realcom_init(struct rtu_desc *rtu)
     return write(rtu->cfg.realcom.cmdfd, cmd, sizeof(cmd));
 }
 
-int realcom_process_cmd(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
+int realcom_process_cmd(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
 {
     int nr;
     int i = 0;
-    u_int8_t cmd[3];
+    uint8_t cmd[3];
 
     while (len) {
         switch (buf[i]) {

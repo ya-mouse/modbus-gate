@@ -1,6 +1,6 @@
 #include "mbus-gw.h"
 
-static const u_int16_t crc_table[] = {
+static const uint16_t crc_table[] = {
 0X0000, 0XC0C1, 0XC181, 0X0140, 0XC301, 0X03C0, 0X0280, 0XC241,
 0XC601, 0X06C0, 0X0780, 0XC741, 0X0500, 0XC5C1, 0XC481, 0X0440,
 0XCC01, 0X0CC0, 0X0D80, 0XCD41, 0X0F00, 0XCFC1, 0XCE81, 0X0E40,
@@ -35,9 +35,9 @@ static const u_int16_t crc_table[] = {
 0X8201, 0X42C0, 0X4380, 0X8341, 0X4100, 0X81C1, 0X8081, 0X4040,
 };
 
-u_int16_t crc16(const u_int8_t *data, int len)
+uint16_t crc16(const uint8_t *data, int len)
 {
-    u_int16_t crc = 0xffff;
+    uint16_t crc = 0xffff;
 
     while (len--)
     {

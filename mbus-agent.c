@@ -28,7 +28,7 @@ void *rtu_thread(void *arg)
 {
     int ep;
     struct rtu_desc *ri;
-    u_int8_t buf[BUF_SIZE];
+    uint8_t buf[BUF_SIZE];
     struct epoll_event *evs;
     struct cfg *cfg = (struct cfg *)arg;
 
@@ -112,7 +112,7 @@ err:
 void *tcp_thread(void *p)
 {
     int n;
-    u_int8_t buf[BUF_SIZE];
+    uint8_t buf[BUF_SIZE];
     struct workers *self = (struct workers *)p;
     struct epoll_event evs[MAX_EVENTS];
 

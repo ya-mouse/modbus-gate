@@ -1,7 +1,9 @@
 #ifndef _MBUS_COMMON__H
 #define _MBUS_COMMON__H 1
 
+#include <stdint.h>
 #include <termios.h>
+#include <pthread.h>
 #include <sys/time.h>
 #include "vect.h"
 
@@ -19,34 +21,40 @@
 #define RTU_TIMEOUT     3
 #define CACHE_TTL       1
 
+#ifndef SUN_LEN
+#define SUN_LEN(ptr) ((size_t) (((struct sockaddr_un *) 0)->sun_path) + strlen ((ptr)->sun_path))
+#endif
+
 enum rtu_type {
     NONE,
     ASCII,
     RTU,
     TCP,
     UNIX,
+#ifndef _NUTTX_BUILD
     REALCOM,
+#endif
 };
 
 struct cache_page {
-    u_int8_t status;        /* 0 - ok, 1 - timeout, 2 - NA */
-    u_int8_t slaveid;
-    u_int16_t addr;
-    u_int16_t function;
-    u_int16_t len;
+    uint8_t status;        /* 0 - ok, 1 - timeout, 2 - NA */
+    uint8_t slaveid;
+    uint16_t addr;
+    uint16_t function;
+    uint16_t len;
     time_t ttd;             /* time to die of the page: last_timestamp + TTL */
-    u_int8_t *buf;
+    uint8_t *buf;
     struct cache_page *next;
     struct cache_page *prev;
 };
 
 struct queue_list {
     int resp_fd;            /* "response to" descriptor */
-    u_int8_t *buf;          /* request buffer */
+    uint8_t *buf;          /* request buffer */
     size_t len;             /* request length */
     time_t stamp;           /* timestamp of timeout: last_timestamp + timeout */
     int16_t src;            /* source slave_id */
-    u_int8_t tido[2];
+    uint8_t tido[2];
 };
 
 typedef QUEUE(struct queue_list) queue_list_v;
@@ -64,7 +72,7 @@ struct rtu_desc {
     long timeout;           /* timeout in seconds */
     int baud;               /* global baud rate */
     enum rtu_type type;     /* endpoint RTU device type */
-    u_int16_t tid;
+    uint16_t tid;
     slave_map_v slave_id;   /* slave_id configured for MODBUS-TCP */
     union {
 #define RTU_CFG_COMMON       \
@@ -92,7 +100,7 @@ struct rtu_desc {
     } cfg;
 
     /* Master-related stuff */
-    u_int8_t tido[2];
+    uint8_t tido[2];
     queue_list_v q;         /* queue list */
     struct cache_page *p;   /* cache pages */
     int16_t toread;      /* number of words (2-bytes) to read for RTU */
@@ -109,6 +117,6 @@ struct workers {
     struct cfg *cfg;
 };
 
-extern u_int16_t crc16(const u_int8_t *data, int len);
+extern uint16_t crc16(const uint8_t *data, int len);
 
 #endif /* _MBUS_COMMON__H */

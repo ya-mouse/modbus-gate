@@ -10,7 +10,7 @@
 #define CFG_DEFAULT_SOCKFILE "/tmp/mbus-gw.sock"
 
 enum err {
-    OK = 0,
+    CFG_OK = 0,
     PARSER_SYNTAX,
     UNKNOWN_VALUE,
     MISSED_VALUE,

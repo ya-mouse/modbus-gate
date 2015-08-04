@@ -4,23 +4,41 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/epoll.h>
 #include <sys/wait.h>
+#ifndef _NUTTX_BUILD
+#include <sys/epoll.h>
+#include <netinet/tcp.h>
+#include <netinet/in.h>
+#else
+#include "epoll.h"
+#endif
 #include <sys/un.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netinet/tcp.h>
 #include <netinet/ip.h>
-#include <netinet/in.h>
 #include <netdb.h>
 #include <pthread.h>
 #include <time.h>
 
 #include "mbus-gw.h"
+#ifndef _NUTTX_BUILD
 #include "aspp.h"
+#endif
 #include "cfg.h"
 #include "rtu.h"
+
+#ifdef _NUTTX_BUILD
+#define pthread_rwlock_t          pthread_mutex_t
+#define pthread_rwlock_init(x, y) pthread_mutex_init(x, y)
+#define pthread_rwlock_destroy(x) pthread_mutex_destroy(x)
+#define pthread_rwlock_rdlock(x)  pthread_mutex_lock(x)
+#define pthread_rwlock_wrlock(x)  pthread_mutex_lock(x)
+#define pthread_rwlock_unlock(x)  pthread_mutex_unlock(x)
+#endif
+
+#undef MAX_EVENTS
+#define MAX_EVENTS 3
 
 static pthread_rwlock_t rwlock;
 
@@ -50,8 +68,11 @@ struct rtu_desc *rtu_by_fd(struct cfg *cfg, int fd)
 
     pthread_rwlock_rdlock(&rwlock);
     VFOREACH(cfg->rtu_list, ri) {
-        if (ri->fd == fd ||
-           (ri->type == REALCOM && ri->cfg.realcom.cmdfd == fd))
+        if (ri->fd == fd
+#ifndef _NUTTX_BUILD
+            || (ri->type == REALCOM && ri->cfg.realcom.cmdfd == fd)
+#endif
+           )
             goto out;
     }
     ri = NULL;
@@ -62,7 +83,7 @@ out:
     return ri;
 }
 
-void cache_update(struct rtu_desc *rtu, const u_int8_t *buf, size_t len)
+void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
 {
     int slave = 0;
     int func = 0;
@@ -245,7 +266,7 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
     return p;
 }
 
-static void dump(const u_int8_t *buf, size_t len)
+static void dump(const uint8_t *buf, size_t len)
 {
 #ifdef DEBUG
     int i;
@@ -260,7 +281,7 @@ static void dump(const u_int8_t *buf, size_t len)
 }
 
 int queue_add(struct cfg *cfg,
-              int slave_id, int fd, const u_int8_t *buf, size_t len)
+              int slave_id, int fd, const uint8_t *buf, size_t len)
 {
     struct slave_map *mi;
     struct rtu_desc *ri;
@@ -287,7 +308,7 @@ found:
     dump(buf, len);
     DEBUGF("=== added === %d\n", fd);
     if (ri->type == RTU) {
-        u_int16_t crc;
+        uint16_t crc;
         q.buf = malloc(len-4);
         q.len = len-4;
         q.tido[0] = buf[0];
@@ -333,7 +354,7 @@ void *rtu_thread(void *arg)
     struct cache_page *p;
     queue_list_v *qv;
     struct queue_list *q;
-    u_int8_t buf[BUF_SIZE];
+    uint8_t buf[BUF_SIZE];
     struct epoll_event *evs;
     struct cfg *cfg = (struct cfg *)arg;
 
@@ -350,7 +371,7 @@ void *rtu_thread(void *arg)
         rtu_open(ri, ep);
     }
 
-    fprintf(stderr, "RTU Ready\n");
+    fprintf(stderr, "RTU Ready: %08x %d\n", ep, VLEN(cfg->rtu_list));
 
     for (;;) {
         int n;
@@ -412,12 +433,14 @@ reconnect:
             DEBUGF(">>> Read %d bytes from #%d\n", len, evs[n].data.fd);
             dump(buf, len);
 
+#ifndef _NUTTX_BUILD
             /* Process RealCOM command */
             if (ri->type == REALCOM && ri->fd != evs[n].data.fd) {
                 DEBUGF("Process CMD %d (#%d,#%d)\n", len, ri->fd, evs[n].data.fd);
                 realcom_process_cmd(ri, buf, len);
                 continue;
             }
+#endif
 
             if (ri->type == RTU) {
                 if ((buf[1] & 0xf0) == 0x80) {
@@ -559,7 +582,7 @@ err:
 void *tcp_thread(void *p)
 {
     int n;
-    u_int8_t buf[BUF_SIZE];
+    uint8_t buf[BUF_SIZE];
     struct workers *self = (struct workers *)p;
     struct epoll_event evs[MAX_EVENTS];
 
@@ -572,6 +595,7 @@ void *tcp_thread(void *p)
     /* Main loop */
     for (;;) {
         int nfds = epoll_wait(self->ep, evs, MAX_EVENTS, -1);
+
         if (nfds == -1) {
             if (errno == EINTR)
                 continue;
@@ -597,13 +621,7 @@ void *tcp_thread(void *p)
             } else if (len < 0) {
                 perror("Error occured");
             } else {
-#if 0
-                char ans[] = "HTTP/1.1 200 OK\r\nServer: fake/1.0\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>OK</html>\r\n";
-                int sz = sizeof(ans);
-                write(evs[n].data.fd, ans, sz);
-#endif
                 queue_add(self->cfg, buf[6], evs[n].data.fd, buf, len);
-
                 // fprintf(stderr, "%d Read %d bytes from %d\n", self->n, len, evs[n].data.fd);
                 // goto c_close;
             }
@@ -611,12 +629,24 @@ void *tcp_thread(void *p)
     }
 
 err:
+#ifdef _NUTTX_BUILD
+    epoll_close(self->ep);
+#else
     close(self->ep);
+#endif
 
     return NULL;
 }
 
-int main(int argc, char **argv)
+#ifdef _NUTTX_BUILD
+# ifdef CONFIG_BUILD_KERNEL
+int main(int argc, FAR char *argv[])
+# else
+int mbusgw_main(int argc, FAR char *argv[])
+# endif
+#else
+int main(int argc, char *argv[])
+#endif
 {
     int c;
     int n;
@@ -628,7 +658,11 @@ int main(int argc, char **argv)
     pthread_t rtu_proc;
     pthread_attr_t attr;
     struct sockaddr_un name;
+#ifndef _NUTTX_BUILD
     struct sockaddr_in6 sin6;
+#else
+    struct sockaddr_in sin;
+#endif
     struct epoll_event ev;
     struct epoll_event evs[2];
     struct cfg *cfg;
@@ -644,15 +678,21 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#ifndef _NUTTX_BUILD
     if ((sd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
+#else
+    if ((sd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+#endif
         perror("socket(AF_INET6) failed");
         return 1;
     }
 
+#ifndef _NUTTX_BUILD
     if ((ud = socket(PF_LOCAL, SOCK_STREAM, 0)) < 0) {
         perror("socket(PF_LOCAL) failed");
         return 1;
     }
+#endif
 
     n = 1;
     if (setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, (char *)&n, sizeof(n)) < 0) {
@@ -660,26 +700,40 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    memset(&sin6, 0, sizeof(sin6));
     memset(&name, 0, sizeof(name));
-
+#ifndef _NUTTX_BUILD
+    memset(&sin6, 0, sizeof(sin6));
     sin6.sin6_family = AF_INET6;
     sin6.sin6_port = htons(MODBUS_TCP_PORT);
     sin6.sin6_addr = in6addr_any;
-
+#else
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(MODBUS_TCP_PORT);
+    sin.sin_addr.s_addr = htonl(0x0a000002);
+#endif
     name.sun_family = AF_LOCAL;
     strcpy(name.sun_path, cfg->sockfile);
 
+#ifndef _NUTTX_BUILD
     /* Bind to IPv6 */
     if (bind(sd, (struct sockaddr *)&sin6, sizeof(sin6)) < 0) {
         perror("bind(sd) failed");
         return 1;
     }
+#else
+    /* Bind to IPv4 */
+    if (bind(sd, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
+        perror("bind(sd) failed");
+        return 1;
+    }
+#endif
     if (listen(sd, MAX_EVENTS >> 1) < 0) {
         perror("listen(sd) failed");
         return 1;
     }
 
+#ifndef _NUTTX_BUILD
     /* Bind to UNIX socket */
     if (bind(ud, (struct sockaddr *)&name, SUN_LEN(&name)) < 0) {
         perror("bind(ud) failed");
@@ -689,6 +743,7 @@ int main(int argc, char **argv)
         perror("listen(ud) failed");
         return 1;
     }
+#endif
 
     ep = epoll_create(2);
     if (ep == -1) {
@@ -704,6 +759,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#ifndef _NUTTX_BUILD
     ev.events = EPOLLIN | EPOLLERR;
     ev.data.fd = ud;
 
@@ -711,32 +767,47 @@ int main(int argc, char **argv)
         perror("epoll_ctl(ud) failed");
         return 1;
     }
+#endif
 
     /* Pre-fork threads */
     pthread_rwlock_init(&rwlock, NULL);
 
     pthread_attr_init(&attr);
+#ifdef PTHREAD_CREATE_DETACHED
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+#endif
     if (pthread_create(&rtu_proc, &attr, rtu_thread, cfg) < 0) {
         perror("pthread_create() failed");
         return 2;
     }
+#ifndef PTHREAD_CREATE_DETACHED
+    pthread_detach(rtu_proc);
+#endif
 
     workers = malloc(sizeof(struct workers) * cfg->workers);
 
     for (n = 0; n < cfg->workers; ++n) {
         pthread_attr_init(&attr);
+#ifdef PTHREAD_CREATE_DETACHED
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+#endif
         workers[n].n = n;
         workers[n].cfg = cfg;
         if (pthread_create(&workers[n].th, &attr, tcp_thread, &workers[n]) < 0) {
             perror("pthread_create() failed");
             return 2;
         }
+#ifndef PTHREAD_CREATE_DETACHED
+        pthread_detach(workers[n].th);
+#endif
     }
 
     for (;;) {
+#ifndef _NUTTX_BUILD
         struct sockaddr_in6 local;
+#else
+        struct sockaddr_in local;
+#endif
         socklen_t addrlen = sizeof(local);
         int nfds;
 
@@ -754,7 +825,7 @@ int main(int argc, char **argv)
             if (!(evs[n].events & EPOLLIN))
                 continue;
 
-    //        fprintf(stderr, "%d events=%d\n", nfds, evs[0].events);
+            fprintf(stderr, "%d events=%d\n", nfds, evs[0].events);
 
             c = accept(evs[n].data.fd, (struct sockaddr *)&local, &addrlen);
 
@@ -771,6 +842,7 @@ int main(int argc, char **argv)
             } else {
                 ev.events = EPOLLIN;
                 ev.data.fd = c;
+                fprintf(stderr, "%d Adding() %d %d\n", evs[n].data.fd, c, ((struct sockaddr_in *)&local)->sin_port);
 //                fprintf(stderr, "%d Adding() %d %d\n", ep, c, ((struct sockaddr_in6 *)&local)->sin6_port);
                 if (epoll_ctl(workers[cur_child++].ep, EPOLL_CTL_ADD, c, &ev) < 0) {
                     perror("epoll_ctl ADD()");
@@ -784,7 +856,9 @@ int main(int argc, char **argv)
     rc = 0;
 die:
     pthread_rwlock_destroy(&rwlock);
+#ifndef _NUTTX_BUILD
     close(ud);
+#endif
     close(sd);
 
     return 0;
