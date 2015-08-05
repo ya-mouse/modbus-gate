@@ -3,11 +3,9 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
-#ifndef _NUTTX_BUILD
 #include <sys/epoll.h>
+#ifndef _NUTTX_BUILD
 #include <netinet/tcp.h>
-#else
-#include "epoll.h"
 #endif
 #include <sys/ioctl.h>
 #include <sys/un.h>
