@@ -52,7 +52,7 @@ STACKSIZE = $(CONFIG_SYSTEM_VI_STACKSIZE)
 
 ASRCS =
 CSRCS =
-MAINSRC = cfg.c crc16.c rtu.c mbus-gw.c epoll.c
+MAINSRC = cfg.c crc16.c rtu.c mbus-gw.c
 
 #MAINSRC += libyaml-0.1.4/src/api.c libyaml-0.1.4/src/dumper.c libyaml-0.1.4/src/emitter.c \
 #	libyaml-0.1.4/src/loader.c libyaml-0.1.4/src/parser.c libyaml-0.1.4/src/reader.c \
