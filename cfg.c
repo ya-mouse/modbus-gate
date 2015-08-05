@@ -442,7 +442,7 @@ struct cfg *cfg_load(const char *fname)
       VINIT(r.slave_id);
       r.type = RTU;
       r.cfg.serial.devname = strdup("/dev/ttyS1");
-      r.cfg.serial.t.c_cflag = CS8 | B19200;
+      r.cfg.serial.t.c_cflag = CS8 | B9600;
       map.src = 1;
       map.dst = 1;
       VADD(r.slave_id, map);
