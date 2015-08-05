@@ -1,4 +1,7 @@
 *.o
 *~
+.depend
+.built
+Make.dep
 mbus-gw
 mbus-agent

@@ -147,7 +147,7 @@
 
 extern int realcom_init(struct rtu_desc *rtu);
 extern int realcom_process_cmd(struct rtu_desc *rtu,
-                               const u_int8_t *buf,
+                               const uint8_t *buf,
                                size_t len);
 
 #endif /* _ASPP__H */

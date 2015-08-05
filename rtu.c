@@ -4,19 +4,27 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/epoll.h>
+#ifndef _NUTTX_BUILD
+#include <netinet/tcp.h>
+#endif
+#include <sys/ioctl.h>
 #include <sys/un.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netinet/tcp.h>
 #include <netinet/ip.h>
 #include <netinet/in.h>
 #include <netdb.h>
-
 #include "cfg.h"
 #include "rtu.h"
 #include "common.h"
+#ifndef _NUTTX_BUILD
 #include "aspp.h"
+#endif
+
+#ifndef NI_MAXSERV
+#define NI_MAXSERV 32
+#endif
 
 int setnonblocking(int sockfd)
 {
@@ -105,6 +113,7 @@ int rtu_open_tcp(struct rtu_desc *rtu, int port)
     hints.ai_flags = AI_NUMERICSERV;
     hints.ai_protocol = IPPROTO_TCP;
 
+#if 0
     if (getaddrinfo(rtu->cfg.tcp.hostname, service, &hints, &result) != 0) {
         return -1;
     }
@@ -119,6 +128,7 @@ int rtu_open_tcp(struct rtu_desc *rtu, int port)
  
         if (rp->ai_family == AF_INET) {
             int opt = 1;
+#ifndef _NUTTX_BUILD
             /* Set the TCP no delay flag */
             if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
                            (const void *)&opt, sizeof(int)) == -1) {
@@ -138,6 +148,7 @@ int rtu_open_tcp(struct rtu_desc *rtu, int port)
                 close(s);
                 continue;
             }
+#endif
 
             if (setnonblocking(s) < 0) {
                 close(s);
@@ -156,11 +167,13 @@ int rtu_open_tcp(struct rtu_desc *rtu, int port)
         }
     }
     freeaddrinfo(result);
+#endif
 
     rtu->retries++;
     return rtu->fd;
 }
 
+#ifndef _NUTTX_BUILD
 int rtu_open_realcom(struct rtu_desc *rtu)
 {
     int rc;
@@ -184,6 +197,7 @@ int rtu_open_realcom(struct rtu_desc *rtu)
 
     return rtu->fd;
 }
+#endif
 
 int rtu_open(struct rtu_desc *rtu, int ep)
 {
@@ -197,6 +211,7 @@ int rtu_open(struct rtu_desc *rtu, int ep)
     switch (rtu->type) {
     case NONE:
         break;
+
     case RTU:
     case ASCII:
         rc = rtu_open_serial(rtu);
@@ -204,7 +219,7 @@ int rtu_open(struct rtu_desc *rtu, int ep)
             printf("Unable to open %s (%d)\n", rtu->cfg.serial.devname, errno);
         }
         break;
-    
+
     case TCP:
         rc = rtu_open_tcp(rtu, rtu->cfg.tcp.port);
         if (rc < 0) {
@@ -221,6 +236,7 @@ int rtu_open(struct rtu_desc *rtu, int ep)
         }
         break;
 
+#ifndef _NUTTX_BUILD
     case REALCOM:
         rc = rtu_open_realcom(rtu);
         if (rc < 0 || rtu->cfg.realcom.cmdfd < 0) {
@@ -244,6 +260,7 @@ int rtu_open(struct rtu_desc *rtu, int ep)
             rc = -1;
         }
         break;
+#endif
     }
 
     if (rc != -1) {
@@ -253,10 +270,12 @@ int rtu_open(struct rtu_desc *rtu, int ep)
         if (epoll_ctl(ep, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
             perror("epoll_ctl(rtu) failed");
             close(rc);
+#ifndef _NUTTX_BUILD
             if (rtu->type == REALCOM) {
                 epoll_ctl(ep, EPOLL_CTL_DEL, rtu->cfg.realcom.cmdfd, NULL);
                 close(rtu->cfg.realcom.cmdfd);
             }
+#endif
             rc = -1;
         }
     }
@@ -271,10 +290,12 @@ void rtu_close(struct rtu_desc *rtu, int ep)
         epoll_ctl(ep, EPOLL_CTL_DEL, rtu->fd, NULL);
         close(rtu->fd);
     }
+#ifndef _NUTTX_BUILD
     if (rtu->type == REALCOM && rtu->cfg.realcom.cmdfd) {
         epoll_ctl(ep, EPOLL_CTL_DEL, rtu->cfg.realcom.cmdfd, NULL);
         close(rtu->cfg.realcom.cmdfd);
         rtu->cfg.realcom.cmdfd = -1;
     }
+#endif
     rtu->fd = -1;
 }

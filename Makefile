@@ -1,3 +1,6 @@
+ifneq ($(APPDIR),)
+include Makefile.nuttx
+else
 GCC  = $(CROSS_COMPILE)gcc
 CFLAGS = -Wall -Wno-unused-result
 LIBS = -lpthread -lyaml -g
@@ -27,4 +30,5 @@ mbus-agent: $(C_OBJS) mbus-agent.o
 	$(GCC) -o $@ $^ $(LIBS)
 
 clean:
-	rm -f $(C_OBJS) mbus-gw.o mbus-agent.o mbuw-gw mbus-agent
+	rm -f $(C_OBJS) mbus-gw.o mbus-agent.o mbus-gw mbus-agent
+endif

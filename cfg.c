@@ -33,6 +33,7 @@ static int get_speed(const char *baud, int defval)
     return spd;
 }
 
+#ifndef _NUTTX_BUILD
 static void cfg_expect_event(struct cfg *cfg, const enum yaml_event_type_e type)
 {
     yaml_event_t event;
@@ -207,12 +208,14 @@ static void cfg_parse_rtu(struct cfg *cfg)
                 } else if (!strcasecmp(v, "modbus-tcp")) {
                     r.type = TCP;
                     r.cfg.tcp.port = 502;
+#ifndef _NUTTX_BUILD
                 } else if (!strcasecmp(v, "modbus-realcom")) {
                     r.type = REALCOM;
                     r.cfg.realcom.port = -1;
                     r.cfg.realcom.cmdfd = -1;
                     r.fd = -1;
                     r.cfg.realcom.t.c_cflag = CS8 | B9600;
+#endif
                 } else {
                     cfg->err = UNKNOWN_VALUE;
                     fprintf(stderr, "Unkown TYPE: %s\n", v);
@@ -233,7 +236,11 @@ static void cfg_parse_rtu(struct cfg *cfg)
                 if (!(v = cfg_get_string(cfg, NULL, &event)))
                     break;
 
-                if (r.type == TCP || r.type == REALCOM) {
+                if (r.type == TCP
+#ifndef _NUTTX_BUILD
+                    || r.type == REALCOM
+#endif
+                   ) {
                     r.cfg.tcp.hostname = strdup(v);
                 } else {
                     cfg->err = INVALID_PARAM;
@@ -241,7 +248,11 @@ static void cfg_parse_rtu(struct cfg *cfg)
                 }
             } else if (!strcmp(v, "port")) {
                 iv = cfg_get_int(cfg, -1);
-                if ((r.type == TCP || r.type == REALCOM) && iv != -1) {
+                if ((r.type == TCP
+#ifndef _NUTTX_BUILD
+                     || r.type == REALCOM
+#endif
+                    ) && iv != -1) {
                     r.cfg.tcp.port = 950 + iv - 1;
                 } else {
                     cfg->err = INVALID_PARAM;
@@ -258,10 +269,12 @@ static void cfg_parse_rtu(struct cfg *cfg)
 
                 spd = get_speed(v, B9600);
 
-                if (r.type == REALCOM) {
-                    r.cfg.realcom.t.c_cflag = CS8 | spd;
-                } else if (r.type == RTU) {
+                if (r.type == RTU) {
                     r.cfg.serial.t.c_cflag = CS8 | spd;
+#ifndef _NUTTX_BUILD
+                } else if (r.type == REALCOM) {
+                    r.cfg.realcom.t.c_cflag = CS8 | spd;
+#endif
                 } else {
                     cfg->err = INVALID_PARAM;
                     fprintf(stderr, "Invalid param BAUD for the RTU\n");
@@ -270,6 +283,7 @@ static void cfg_parse_rtu(struct cfg *cfg)
             break;
 
         case YAML_MAPPING_END_EVENT:
+#ifndef _NUTTX_BUILD
             if (r.type == REALCOM) {
                 if (r.cfg.realcom.port == -1) {
                     cfg->err = MISSED_VALUE;
@@ -278,6 +292,7 @@ static void cfg_parse_rtu(struct cfg *cfg)
                 }
                 r.cfg.realcom.cmdport = 16 + r.cfg.realcom.port;
             }
+#endif
             if (r.timeout == 0) {
                 r.timeout = RTU_TIMEOUT;
             }
@@ -386,6 +401,7 @@ static void cfg_parse_config(struct cfg *cfg)
     cfg_expect_event(cfg, YAML_DOCUMENT_END_EVENT);
     cfg_expect_event(cfg, YAML_STREAM_END_EVENT);
 }
+#endif
 
 void cfg_free(struct cfg *cfg)
 {
@@ -398,22 +414,41 @@ struct cfg *cfg_load(const char *fname)
     FILE *fp;
     struct cfg *cfg = NULL;
 
+#if 0
     fp = fopen(fname, "r");
     if (!fp) {
         return cfg;
     }
+#endif
 
     cfg = calloc(1, sizeof(struct cfg));
-    cfg->workers = CFG_DEFAULT_WORKERS;
+    cfg->workers = 1; //CFG_DEFAULT_WORKERS;
     cfg->ttl = CFG_DEFAULT_TTL;
     cfg->sockfile = strdup(CFG_DEFAULT_SOCKFILE);
 
+#if 0
     yaml_parser_initialize(&cfg->parser);
     yaml_parser_set_input_file(&cfg->parser, fp);
     cfg_parse_config(cfg);
     yaml_parser_delete(&cfg->parser);
 
     fclose(fp);
+#else
+    VINIT(cfg->rtu_list);
+    {
+      struct rtu_desc r;
+      struct slave_map map;
+      memset(&r, 0, sizeof(struct rtu_desc));
+      VINIT(r.slave_id);
+      r.type = RTU;
+      r.cfg.serial.devname = strdup("/dev/ttyS1");
+      r.cfg.serial.t.c_cflag = CS8 | B9600;
+      map.src = 1;
+      map.dst = 1;
+      VADD(r.slave_id, map);
+      VADD(cfg->rtu_list, r);
+    }
+#endif
 
     if (cfg->err) {
         cfg_free(cfg);
