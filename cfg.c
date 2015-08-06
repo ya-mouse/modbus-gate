@@ -414,7 +414,7 @@ struct cfg *cfg_load(const char *fname)
     FILE *fp;
     struct cfg *cfg = NULL;
 
-#if 0
+#if 1
     fp = fopen(fname, "r");
     if (!fp) {
         return cfg;
@@ -426,7 +426,7 @@ struct cfg *cfg_load(const char *fname)
     cfg->ttl = CFG_DEFAULT_TTL;
     cfg->sockfile = strdup(CFG_DEFAULT_SOCKFILE);
 
-#if 0
+#if 1
     yaml_parser_initialize(&cfg->parser);
     yaml_parser_set_input_file(&cfg->parser, fp);
     cfg_parse_config(cfg);
