@@ -2,7 +2,7 @@ ifneq ($(APPDIR),)
 include Makefile.nuttx
 else
 GCC  = $(CROSS_COMPILE)gcc
-CFLAGS = -Wall -Wno-unused-result
+CFLAGS = -Wall -Wno-unused-result -g
 LIBS = -lpthread -lyaml -g
 
 C_SRCS = \
@@ -14,7 +14,7 @@ C_SRCS = \
 
 C_OBJS = $(C_SRCS:%.c=%.o)
 
-all: mbus-gw mbus-agent
+all: mbus-gw
 
 %.o: %.c
 	$(GCC) -O3 -g -c -o $@ $^ $(CFLAGS)
