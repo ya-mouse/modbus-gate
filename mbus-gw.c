@@ -858,7 +858,7 @@ int main(int argc, char *argv[])
             if (!(evs[n].events & EPOLLIN))
                 continue;
 
-            fprintf(stderr, "%d events=%d\n", nfds, evs[0].events);
+//            fprintf(stderr, "%d events=%d\n", nfds, evs[0].events);
 
             c = accept(evs[n].data.fd, (struct sockaddr *)&local, &addrlen);
 
@@ -875,7 +875,7 @@ int main(int argc, char *argv[])
             } else {
                 ev.events = EPOLLIN;
                 ev.data.fd = c;
-                fprintf(stderr, "%d Adding() %d %d\n", evs[n].data.fd, c, ((struct sockaddr_in *)&local)->sin_port);
+//                fprintf(stderr, "%d Adding() %d %d\n", evs[n].data.fd, c, ((struct sockaddr_in *)&local)->sin_port);
 //                fprintf(stderr, "%d Adding() %d %d\n", ep, c, ((struct sockaddr_in6 *)&local)->sin6_port);
                 if (epoll_ctl(workers[cur_child++].ep, EPOLL_CTL_ADD, c, &ev) < 0) {
                     perror("epoll_ctl ADD()");
