@@ -5,12 +5,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
-#ifndef _NUTTX_BUILD
 #include <sys/epoll.h>
+#ifndef _NUTTX_BUILD
 #include <netinet/tcp.h>
 #include <netinet/in.h>
-#else
-#include "epoll.h"
 #endif
 #include <sys/un.h>
 #include <sys/socket.h>
@@ -46,8 +44,12 @@ struct rtu_desc *rtu_by_slaveid(struct cfg *cfg, int slave_id)
 {
     struct slave_map *mi;
     struct rtu_desc *ri;
+    int rc;
 
-    pthread_rwlock_rdlock(&rwlock);
+    if ((rc = pthread_rwlock_rdlock(&rwlock)) != 0) {
+        printf("rtu_by_slaveid: rdlock=%d\n", rc);
+        return NULL;
+    }
     VFOREACH(cfg->rtu_list, ri) {
         VFOREACH(ri->slave_id, mi) {
             if (mi->src == slave_id)
@@ -57,7 +59,8 @@ struct rtu_desc *rtu_by_slaveid(struct cfg *cfg, int slave_id)
     ri = NULL;
 
 out:
-    pthread_rwlock_unlock(&rwlock);
+    if (pthread_rwlock_unlock(&rwlock) != 0)
+        printf("rtu_by_slaveid: unlock FAILED\n");
 
     return ri;
 }
@@ -65,8 +68,12 @@ out:
 struct rtu_desc *rtu_by_fd(struct cfg *cfg, int fd)
 {
     struct rtu_desc *ri;
+    int rc;
 
-    pthread_rwlock_rdlock(&rwlock);
+    if ((rc = pthread_rwlock_rdlock(&rwlock)) != 0) {
+        printf("rtu_by_fd: rdlock=%d\n", rc);
+        return NULL;
+    }
     VFOREACH(cfg->rtu_list, ri) {
         if (ri->fd == fd
 #ifndef _NUTTX_BUILD
@@ -78,7 +85,8 @@ struct rtu_desc *rtu_by_fd(struct cfg *cfg, int fd)
     ri = NULL;
 
 out:
-    pthread_rwlock_unlock(&rwlock);
+    if (pthread_rwlock_unlock(&rwlock) != 0)
+        printf("rtu_by_fd: unlock FAILED\n");
 
     return ri;
 }
@@ -90,6 +98,7 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
     int addr = 0;
     int nb = 0;
     int i;
+    int rc;
     struct queue_list *q;
     struct cache_page *p;
     struct cache_page *new;
@@ -99,8 +108,10 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
         return;
     }
 
-    DEBUGF("update_cache\n");
-    pthread_rwlock_wrlock(&rwlock);
+    if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
+        printf("cache_update: wrlock=%d\n", rc);
+        return;
+    }
     /* TODO: Write (change register) request shouldn't be cached */
     /* Check for function type */
     // ...
@@ -139,6 +150,8 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
         if (q->buf[0] != buf[0] || q->buf[1] != buf[1]) {
             DEBUGF(">>> Wrong ordered response: %d expected %d\n",
                    (buf[0] << 8) | buf[1], (q->buf[0] << 8) | q->buf[1]);
+            if (pthread_rwlock_unlock(&rwlock) != 0)
+                printf("cache_update: 0 unlock FAILED\n");
             return;
         }
     }
@@ -147,7 +160,6 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
 //    if (buf[7] & 0x80)
 
     if (!rtu->p) {
-//        printf("new cache: ");
         p = rtu->p = calloc(1, sizeof(struct cache_page));
         p->next = NULL;
         p->prev = NULL;
@@ -182,7 +194,6 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
         new->prev = p;
         p = new;
     }
-    DEBUGF("alloc %p n=%p p=%p\n", p, p->next, p->prev);
 
 fill:
     p->function = func;
@@ -201,7 +212,9 @@ update:
     /* TODO: TTL have to be configured via config for each RTU / slave */
 //    q->stamp = 0;
     p->ttd = time(NULL) + rtu->conf->ttl;
-    pthread_rwlock_unlock(&rwlock);
+
+    if (pthread_rwlock_unlock(&rwlock) != 0)
+        printf("cache_update: unlock FAILED\n");
 }
 
 inline struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
@@ -211,7 +224,6 @@ inline struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
     if (!rtu || !p)
         return NULL;
 
-//    DEBUGF("free: %p ", p);
     free(p->buf);
     if (!p->prev) {
         rtu->p = p->next;
@@ -219,11 +231,12 @@ inline struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
             rtu->p->prev = NULL;
     } else {
         p->prev->next = p->next;
+        if (p->next)
+            p->next->prev = p->prev;
     }
     next = p->next;
     free(p);
 
-//    DEBUGF(" n=%p\n", next);
     return next;
 }
 
@@ -286,8 +299,12 @@ int queue_add(struct cfg *cfg,
     struct slave_map *mi;
     struct rtu_desc *ri;
     struct queue_list q;
+    int rc;
 
-    pthread_rwlock_wrlock(&rwlock);
+    if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
+        printf("queue_add: wrlock=%d\n", rc);
+        return -1;
+    }
 
     VFOREACH(cfg->rtu_list, ri) {
         VFOREACH(ri->slave_id, mi) {
@@ -296,7 +313,8 @@ int queue_add(struct cfg *cfg,
         }
     }
 
-    pthread_rwlock_unlock(&rwlock);
+    if (pthread_rwlock_unlock(&rwlock) != 0)
+        printf("queue_add: 0 unlock FAILED\n");
     return -2;
 
 found:
@@ -330,7 +348,8 @@ found:
 
     QADD(ri->q, q);
 
-    pthread_rwlock_unlock(&rwlock);
+    if (pthread_rwlock_unlock(&rwlock) != 0)
+        printf("queue_add: 0 unlock FAILED\n");
 
     return 0;
 }
@@ -350,6 +369,7 @@ inline void _queue_pop(struct rtu_desc *rtu)
 void *rtu_thread(void *arg)
 {
     int ep;
+    int rc;
     struct rtu_desc *ri;
     struct cache_page *p;
     queue_list_v *qv;
@@ -462,7 +482,11 @@ reconnect:
             cache_update(ri, buf, len);
         }
 
-        pthread_rwlock_wrlock(&rwlock);
+        if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
+            printf("rtu_thread: wrlock=%d\n", rc);
+            continue;
+        }
+
         cur_time = time(NULL);
         VFOREACH(cfg->rtu_list, ri) {
             if (!ri->fd) {
@@ -532,22 +556,25 @@ reconnect:
                         break;
                     }
 
+                    /* RTU Endpoint is alive */
+                    if (ri->fd >= 0) {
+
                     if (ri->type == TCP) {
 #if 1
-                    /* Fixup TID */
-                    ri->tido[0] = q->buf[0];
-                    ri->tido[1] = q->buf[1];
-                    q->buf[0] = ri->tid >> 8;
-                    q->buf[1] = ri->tid & 0xff;
-                    ri->tid++;
-                    /* Zero is not allowed as TID */
-                    if (!ri->tid)
-                        ri->tid ^= 1;
+                        /* Fixup TID */
+                        ri->tido[0] = q->buf[0];
+                        ri->tido[1] = q->buf[1];
+                        q->buf[0] = ri->tid >> 8;
+                        q->buf[1] = ri->tid & 0xff;
+                        ri->tid++;
+                        /* Zero is not allowed as TID */
+                        if (!ri->tid)
+                            ri->tid ^= 1;
 #endif
-                    /* Make request to RTU */
-                    if (write(ri->fd, q->buf, q->len) != q->len) {
-                        perror("write() failed");
-                    }
+                        /* Make request to RTU */
+                        if (write(ri->fd, q->buf, q->len) != q->len) {
+                            perror("write() failed");
+                        }
                     } else if (ri->type == RTU) {
                         struct timeval tv;
                         gettimeofday(&tv, NULL);
@@ -565,17 +592,18 @@ reconnect:
                             DEBUGF("toread(#%d)==%d\n", ri->fd, ri->toread);
                             continue;
                         }
-//                        write(ri->fd, q->buf+6, q->len-6);
                     }
                     DEBUGF("Write to RTU: #%d l=%d\n", ri->fd, q->len);
 
+                    }
                     q->stamp = time(NULL) + ri->timeout;
                     break;
                 }
             }
-//            DEBUGF("slave_id=%d queue=%d\n", ri->slave_id, i);
         }
-        pthread_rwlock_unlock(&rwlock);
+
+        if (pthread_rwlock_unlock(&rwlock) != 0)
+            printf("rtu_thread: unlock FAILED\n");
     }
 
 err:
@@ -597,7 +625,11 @@ void *tcp_thread(void *p)
 
     /* Main loop */
     for (;;) {
+#ifdef _NUTTX_BUILD
+        int nfds = epoll_wait(self->ep, evs, MAX_EVENTS, 100);
+#else
         int nfds = epoll_wait(self->ep, evs, MAX_EVENTS, -1);
+#endif
 
         if (nfds == -1) {
             if (errno == EINTR)
@@ -625,8 +657,6 @@ void *tcp_thread(void *p)
                 perror("Error occured");
             } else {
                 queue_add(self->cfg, buf[6], evs[n].data.fd, buf, len);
-                // fprintf(stderr, "%d Read %d bytes from %d\n", self->n, len, evs[n].data.fd);
-                // goto c_close;
             }
         } 
     }
