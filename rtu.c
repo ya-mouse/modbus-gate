@@ -113,7 +113,7 @@ int rtu_open_tcp(struct rtu_desc *rtu, int port)
     hints.ai_flags = AI_NUMERICSERV;
     hints.ai_protocol = IPPROTO_TCP;
 
-#if 0
+#ifndef _NUTTX_BUILD
     if (getaddrinfo(rtu->cfg.tcp.hostname, service, &hints, &result) != 0) {
         return -1;
     }
@@ -125,10 +125,10 @@ int rtu_open_tcp(struct rtu_desc *rtu, int port)
         s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (s < 0)
             continue;
- 
+
         if (rp->ai_family == AF_INET) {
             int opt = 1;
-#ifndef _NUTTX_BUILD
+
             /* Set the TCP no delay flag */
             if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
                            (const void *)&opt, sizeof(int)) == -1) {
@@ -148,7 +148,6 @@ int rtu_open_tcp(struct rtu_desc *rtu, int port)
                 close(s);
                 continue;
             }
-#endif
 
             if (setnonblocking(s) < 0) {
                 close(s);
