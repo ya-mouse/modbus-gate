@@ -374,7 +374,6 @@ void *rtu_thread(void *arg)
     struct cache_page *p;
     queue_list_v *qv;
     struct queue_list *q;
-    uint8_t buf[BUF_SIZE];
     struct epoll_event *evs;
     struct cfg *cfg = (struct cfg *)arg;
 
@@ -434,12 +433,12 @@ void *rtu_thread(void *arg)
             ri = rtu_by_fd(cfg, evs[n].data.fd);
             if (!ri) {
                 /* Should never happens, just clear the event */
-                len = read(evs[n].data.fd, buf, BUF_SIZE);
+//                len = read(evs[n].data.fd, buf, BUF_SIZE);
                 rtu_close(ri, ep);
                 continue;
             }
 
-            len = read(evs[n].data.fd, buf, BUF_SIZE);
+            len = read(evs[n].data.fd, ri->toreadbuf+ri->toread_off, ri->toread);
             if (len <= 0) {
 reconnect:
                 /* TODO: reset "retries" counters after a delay */
@@ -451,23 +450,25 @@ reconnect:
                 continue;
             }
             DEBUGF(">>> Read %d bytes from #%d\n", len, evs[n].data.fd);
-            dump(buf, len);
+            dump(ri->toreadbuf, ri->toread_off + len);
 
 #ifndef _NUTTX_BUILD
             /* Process RealCOM command */
             if (ri->type == REALCOM && ri->fd != evs[n].data.fd) {
                 DEBUGF("Process CMD %d (#%d,#%d)\n", len, ri->fd, evs[n].data.fd);
-                realcom_process_cmd(ri, buf, len);
+                realcom_process_cmd(ri, ri->toreadbuf, len);
                 continue;
             }
 #endif
 
             if (ri->type == RTU) {
-                if ((buf[1] & 0xf0) == 0x80) {
-                    DEBUGF("...exception(#%d): %02x\n", ri->fd, buf[1]);
+                if ((ri->toreadbuf[1] & 0xf0) == 0x80) {
+                    DEBUGF("...exception(#%d): %02x\n", ri->fd, ri->toreadbuf[1]);
                     ri->toread = 0;
+                    ri->toread_off += len;
                 } else {
                     ri->toread -= len;
+                    ri->toread_off += len;
                 }
                 if (ri->toread > 0) {
                     DEBUGF("...more(#%d): %d\n", ri->fd, ri->toread);
@@ -479,7 +480,7 @@ reconnect:
             }
 
             /* Update cache */
-            cache_update(ri, buf, len);
+            cache_update(ri, ri->toreadbuf, ri->toread_off);
         }
 
         if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
@@ -515,10 +516,14 @@ reconnect:
                 q = &QGET(*qv, n);
                 if (q->stamp && q->stamp <= cur_time) {
                     // build response with TIMEOUT error message
-                    DEBUGF("Remove from queue: %d\n", q->buf[6]);
+                    DEBUGF("Remove from queue: %d %ld %ld\n", q->buf[6], q->stamp, cur_time);
                     if (q->resp_fd >= 0)
                         write(q->resp_fd, "\x00\x01\x00\x00\x00\x02\x01\x83", 8);
                     ri->toread = 0;
+                    ri->toread_off = 0;
+                    if (ri->toreadbuf)
+                        free(ri->toreadbuf);
+                    ri->toreadbuf = NULL;
                     _queue_pop(ri);
                     n--;
                     continue;
@@ -587,6 +592,8 @@ reconnect:
                             } else {
                                 ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
                             }
+                            ri->toreadbuf = malloc(ri->toread);
+                            ri->toread_off = 0;
                             DEBUGF("toread(#%d): %d\n", ri->fd, ri->toread);
                         } else {
                             DEBUGF("toread(#%d)==%d\n", ri->fd, ri->toread);
@@ -635,7 +642,8 @@ void *tcp_thread(void *p)
             if (errno == EINTR)
                 continue;
             perror("epoll_wait(tcp) failed");
-            goto err;
+            continue;
+//            goto err;
         }
 
         for (n = 0; n < nfds; ++n) {

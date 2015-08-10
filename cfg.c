@@ -414,7 +414,7 @@ struct cfg *cfg_load(const char *fname)
     FILE *fp;
     struct cfg *cfg = NULL;
 
-#if 1
+#ifndef _NUTTX_BUILD
     fp = fopen(fname, "r");
     if (!fp) {
         return cfg;
@@ -426,7 +426,7 @@ struct cfg *cfg_load(const char *fname)
     cfg->ttl = CFG_DEFAULT_TTL;
     cfg->sockfile = strdup(CFG_DEFAULT_SOCKFILE);
 
-#if 1
+#ifndef _NUTTX_BUILD
     yaml_parser_initialize(&cfg->parser);
     yaml_parser_set_input_file(&cfg->parser, fp);
     cfg_parse_config(cfg);
@@ -441,6 +441,7 @@ struct cfg *cfg_load(const char *fname)
       memset(&r, 0, sizeof(struct rtu_desc));
       VINIT(r.slave_id);
       r.type = RTU;
+      r.timeout = RTU_TIMEOUT;
       r.cfg.serial.devname = strdup("/dev/ttyS1");
       r.cfg.serial.t.c_cflag = CS8 | B9600;
       map.src = 1;

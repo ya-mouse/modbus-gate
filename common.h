@@ -104,6 +104,8 @@ struct rtu_desc {
     queue_list_v q;         /* queue list */
     struct cache_page *p;   /* cache pages */
     int16_t toread;      /* number of words (2-bytes) to read for RTU */
+    int16_t toread_off;  /* number of words read */
+    uint8_t *toreadbuf;  /* temporary buffer */
     struct timeval tv;   /* last request/answer time */
     struct cfg *conf;
 };
