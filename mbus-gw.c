@@ -283,6 +283,7 @@ static void dump(const uint8_t *buf, size_t len)
 {
 #ifdef DEBUG
     int i;
+    printf("--- %d ---\n", len);
     for (i=1; i<=len; ++i) {
         printf("%02x ", buf[i-1]);
         if (!(i % 16))
@@ -290,6 +291,7 @@ static void dump(const uint8_t *buf, size_t len)
     }
     if ((i % 16))
         printf("\n");
+    printf("=== %d ===\n", len);
 #endif
 }
 
@@ -331,6 +333,7 @@ found:
         q.len = len-4;
         q.tido[0] = buf[0];
         q.tido[1] = buf[1];
+        q.function = buf[7];
         memcpy(q.buf, buf+6, len-6);
         q.buf[0] = mi->dst;
         q.src = mi->src;
@@ -515,10 +518,15 @@ reconnect:
                 /* Check for timeouted items */
                 q = &QGET(*qv, n);
                 if (q->stamp && q->stamp <= cur_time) {
+                    uint8_t errbuf[9] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x83 };
                     // build response with TIMEOUT error message
                     DEBUGF("Remove from queue: %d %ld %ld\n", q->buf[6], q->stamp, cur_time);
-                    if (q->resp_fd >= 0)
-                        write(q->resp_fd, "\x00\x01\x00\x00\x00\x02\x01\x83", 8);
+                    if (q->resp_fd >= 0) {
+                        errbuf[0] = q->tido[0];
+                        errbuf[1] = q->tido[1];
+                        errbuf[7] = q->function;
+                        write(q->resp_fd, errbuf, 9);
+                    }
                     ri->toread = 0;
                     ri->toread_off = 0;
                     if (ri->toreadbuf)
@@ -620,7 +628,7 @@ err:
 void *tcp_thread(void *p)
 {
     int n;
-    uint8_t buf[BUF_SIZE];
+    uint8_t buf[260];
     struct workers *self = (struct workers *)p;
     struct epoll_event evs[MAX_EVENTS];
 
@@ -656,17 +664,50 @@ void *tcp_thread(void *p)
                 continue;
             }
 
-            len = read(evs[n].data.fd, buf, BUF_SIZE);
+            len = read(evs[n].data.fd, buf, 6);
             if (len == 0) {
 //c_close:
                 epoll_ctl(self->ep, EPOLL_CTL_DEL, evs[n].data.fd, NULL);
                 close(evs[n].data.fd);
             } else if (len < 0) {
                 perror("Error occured");
-            } else {
-                queue_add(self->cfg, buf[6], evs[n].data.fd, buf, len);
+            } else if (len == 6) {
+                int pktlen;
+                int pkt_count = 0;
+
+                dump(buf, len);
+
+                while (1) {
+                    /* Check for MODBUS magic */
+                    if (buf[2] != 0 || buf[3] != 0) {
+                        break;
+                    }
+
+                    /* Read packet data */
+                    pktlen = buf[5];
+                    DEBUGF("**** pktlen=%d\n", pktlen);
+                    len = read(evs[n].data.fd, buf+6, pktlen);
+                    if (len <= 0)
+                        break;
+
+                    dump(buf, pktlen + 6);
+                    if (len != pktlen) {
+                        DEBUGF("!!! not enough data to read: %d/%d\n", len, pktlen);
+                        break;
+                    }
+                    queue_add(self->cfg, buf[6], evs[n].data.fd, buf, pktlen + 6);
+
+                    /* Limit each client with N packets */
+                    if (++pkt_count == 20)
+                        break;
+
+                    /* Read next header */
+                    len = read(evs[n].data.fd, buf, 6);
+                    if (len <= 0)
+                        break;
+                }
             }
-        } 
+        }
     }
 
 err:

@@ -55,6 +55,7 @@ struct queue_list {
     time_t stamp;           /* timestamp of timeout: last_timestamp + timeout */
     int16_t src;            /* source slave_id */
     uint8_t tido[2];
+    uint8_t function;
 };
 
 typedef QUEUE(struct queue_list) queue_list_v;
