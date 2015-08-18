@@ -50,7 +50,7 @@ struct cache_page {
 
 struct queue_list {
     int resp_fd;            /* "response to" descriptor */
-    uint8_t *buf;          /* request buffer */
+    uint8_t *buf;           /* request buffer */
     size_t len;             /* request length */
     time_t stamp;           /* timestamp of timeout: last_timestamp + timeout */
     int16_t src;            /* source slave_id */
@@ -58,7 +58,7 @@ struct queue_list {
     uint8_t function;
 };
 
-typedef QUEUE(struct queue_list) queue_list_v;
+typedef VECT(struct queue_list) queue_list_v;
 
 struct slave_map {
     int16_t src;

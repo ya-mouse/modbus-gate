@@ -184,6 +184,7 @@ static void cfg_parse_rtu(struct cfg *cfg)
     memset(&r, 0, sizeof(struct rtu_desc));
 
     VINIT(r.slave_id);
+    VINIT(r.q);
 
     for (;;) {
         if (cfg->err)
@@ -440,6 +441,7 @@ struct cfg *cfg_load(const char *fname)
       struct slave_map map;
       memset(&r, 0, sizeof(struct rtu_desc));
       VINIT(r.slave_id);
+      VINIT(r.q);
       r.type = RTU;
       r.timeout = RTU_TIMEOUT;
       r.cfg.serial.devname = strdup("/dev/ttyS1");

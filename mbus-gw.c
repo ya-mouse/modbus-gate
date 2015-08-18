@@ -4,6 +4,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <sys/epoll.h>
 #ifndef _NUTTX_BUILD
@@ -103,8 +104,8 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
     struct cache_page *p;
     struct cache_page *new;
 
-    if (!rtu || !QLEN(rtu->q)) {
-        DEBUGF("rtu=%p qlen=%d\n", rtu, (rtu ? QLEN(rtu->q) : -1));
+    if (!rtu || !VLEN(rtu->q)) {
+        DEBUGF("rtu=%p qlen=%d\n", rtu, (rtu ? VLEN(rtu->q) : -1));
         return;
     }
 
@@ -116,7 +117,7 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
     /* Check for function type */
     // ...
 
-    q = &QGET(rtu->q, 0);
+    q = &VGET(rtu->q, 0);
     /* TODO: handle different RTU types */
     if (rtu->type == TCP) {
         slave = q->buf[6];
@@ -269,8 +270,8 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
     //DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
 
     while (p) {
-        DEBUGF("--> (%d,%d,%d) <> (%d,%d,%d)\n",
-               slave, func, addr, p->slaveid, p->function, p->addr);
+        DEBUGF("--> (%d,%d,%d+%d) <> (%d,%d,%d+%d)\n",
+               slave, func, addr, nb, p->slaveid, p->function, p->addr, p->len);
         if (func == p->function && slave == p->slaveid && addr == p->addr)
             return p;
         p = p->next;
@@ -320,7 +321,7 @@ int queue_add(struct cfg *cfg,
     return -2;
 
 found:
-    DEBUGF("Adding sid=%d to queue len=%d fd=#%d\n", slave_id, len, fd);
+    DEBUGF("Adding sid=%d to queue (%d) len=%d fd=#%d\n", slave_id, VLEN(ri->q), len, fd);
 
     q.stamp = 0;
     q.resp_fd = fd;
@@ -349,7 +350,7 @@ found:
         q.buf[6] = mi->dst;
     }
 
-    QADD(ri->q, q);
+    VADD(ri->q, q);
 
     if (pthread_rwlock_unlock(&rwlock) != 0)
         printf("queue_add: 0 unlock FAILED\n");
@@ -357,16 +358,17 @@ found:
     return 0;
 }
 
-inline void _queue_pop(struct rtu_desc *rtu)
+inline void _queue_remove(struct rtu_desc *rtu, int n)
 {
     struct queue_list *q;
 
     if (!rtu)
         return;
 
-    q = &QREMOVE(rtu->q);
+    q = &VGET(rtu->q, n);
     free(q->buf);
     q->buf = NULL;
+    VREMOVE(rtu->q, n);
 }
 
 void *rtu_thread(void *arg)
@@ -441,7 +443,18 @@ void *rtu_thread(void *arg)
                 continue;
             }
 
-            len = read(evs[n].data.fd, ri->toreadbuf+ri->toread_off, ri->toread);
+            if (ri->toreadbuf == NULL) {
+                uint8_t *buf = malloc(512);
+                len = read(evs[n].data.fd, buf, 512);
+                if (len <= 0)
+                    goto reconnect;
+                DEBUGF("Unordered data received\n");
+                dump(buf, len);
+                free(buf);
+                continue;
+            } else {
+                len = read(evs[n].data.fd, ri->toreadbuf+ri->toread_off, ri->toread);
+            }
             if (len <= 0) {
 reconnect:
                 /* TODO: reset "retries" counters after a delay */
@@ -514,41 +527,46 @@ reconnect:
 
             /* Process queue */
             qv = &ri->q;
-            for (n = 0; n < QLEN(*qv); ++n) {
+            for (n = 0; n < VLEN(*qv); ++n) {
                 /* Check for timeouted items */
-                q = &QGET(*qv, n);
+                q = &VGET(*qv, n);
                 if (q->stamp && q->stamp <= cur_time) {
                     uint8_t errbuf[9] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x83 };
                     // build response with TIMEOUT error message
-                    DEBUGF("Remove from queue: %d %ld %ld\n", q->buf[6], q->stamp, cur_time);
+                    DEBUGF("Remove from queue %p: %d %ld %ld\n", q, q->buf[6], q->stamp, cur_time);
                     if (q->resp_fd >= 0) {
                         errbuf[0] = q->tido[0];
                         errbuf[1] = q->tido[1];
                         errbuf[7] = q->function;
-                        write(q->resp_fd, errbuf, 9);
+                        if (write(q->resp_fd, errbuf, 9) < 0 && errno == EBADF) {
+                            q->resp_fd = -1;
+                        }
                     }
                     ri->toread = 0;
                     ri->toread_off = 0;
                     if (ri->toreadbuf)
                         free(ri->toreadbuf);
                     ri->toreadbuf = NULL;
-                    _queue_pop(ri);
+                    _queue_remove(ri, n);
                     n--;
                     continue;
                 } else {
                     /* Check for cache page */
                     p = _cache_find(ri, q);
                     if (p) {
-                        DEBUGF("Found, respond to #%d len=%d\n",
-                               q->resp_fd, p->len);
+                        DEBUGF("Found %p, respond to #%d len=%d\n",
+                               q, q->resp_fd, p->len);
                         if (ri->type == TCP) {
 #if 1
                             /* Revert TID back */
                             p->buf[0] = ri->tido[0];
                             p->buf[1] = ri->tido[1];
 #endif
-                            if (q->resp_fd >= 0)
-                                write(q->resp_fd, p->buf, p->len);
+                            if (q->resp_fd >= 0) {
+                                if (write(q->resp_fd, p->buf, p->len) < 0 && errno == EBADF) {
+                                    q->resp_fd = -1;
+                                }
+                            }
                         } else if (ri->type == RTU) {
                             uint8_t tcp[520];
                             tcp[0] = q->tido[0];
@@ -558,15 +576,18 @@ reconnect:
                             tcp[5] = (p->len-2) & 0xff;
                             tcp[6] = q->src;
                             memcpy(tcp+7, p->buf+1, p->len-3);
-                            if (q->resp_fd >= 0)
-                                write(q->resp_fd, tcp, p->len + 4);
+                            if (q->resp_fd >= 0) {
+                                if (write(q->resp_fd, tcp, p->len + 4) < 0 && errno == EBADF) {
+                                    q->resp_fd = -1;
+                                }
+                            }
                             dump(tcp, p->len + 4);
                         }
-                        _queue_pop(ri);
+                        _queue_remove(ri, n);
                         n--;
                         continue;
                     } else if (q->stamp) {
-                        break;
+                        continue;
                     }
 
                     /* RTU Endpoint is alive */
@@ -687,8 +708,11 @@ void *tcp_thread(void *p)
                     pktlen = buf[5];
                     DEBUGF("**** pktlen=%d\n", pktlen);
                     len = read(evs[n].data.fd, buf+6, pktlen);
-                    if (len <= 0)
+                    if (len <= 0) {
+                        if (errno == EAGAIN)
+                            perror("*** data");
                         break;
+                    }
 
                     dump(buf, pktlen + 6);
                     if (len != pktlen) {
@@ -796,6 +820,8 @@ int main(int argc, char *argv[])
 #endif
     name.sun_family = AF_LOCAL;
     strcpy(name.sun_path, cfg->sockfile);
+
+    signal(SIGPIPE, SIG_IGN);
 
 #ifndef _NUTTX_BUILD
     /* Bind to IPv6 */
