@@ -58,7 +58,15 @@ struct queue_list {
     uint8_t function;
 };
 
+struct writeback {
+    int fd;                 /* "response to" descriptor */
+    uint8_t *buf;           /* request buffer */
+    size_t len;             /* request length */
+};
+
 typedef VECT(struct queue_list) queue_list_v;
+
+typedef VECT(struct writeback) writeback_v;
 
 struct slave_map {
     int16_t src;

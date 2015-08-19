@@ -358,12 +358,93 @@ found:
     return 0;
 }
 
+void _wbqueue_add(struct cfg *cfg, int fd, uint8_t *buf, int len)
+{
+    struct writeback wb;
+
+    if (fd < 0)
+        return;
+
+    wb.fd = fd;
+    wb.len = len;
+    wb.buf = malloc(len);
+    memcpy(wb.buf, buf, len);
+
+    DEBUGF(">>> queue(%d) to %d buf=%p len=%d\n", VLEN(cfg->wbq), fd, buf, len);
+    VADD(cfg->wbq, wb);
+}
+
+void wbqueue_free(struct cfg *cfg, int fd)
+{
+    int i;
+    int rc;
+
+    /* TODO: dealloc queues by fd, destroy answer queue */
+    if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
+        printf("wbqueue_free: wrlock=%d\n", rc);
+        return;
+    }
+
+    VFORI(cfg->wbq, i) {
+        struct writeback *q = &VGET(cfg->wbq, i);
+        if (q->fd != fd)
+            continue;
+
+        free(q->buf);
+        q->buf = NULL;
+        q->fd = -1;
+        VREMOVE(cfg->wbq, i);
+        --i;
+    }
+
+    if (pthread_rwlock_unlock(&rwlock) != 0)
+        printf("wbqueue_free: 0 unlock FAILED\n");
+
+    close(fd);
+}
+
+void wbqueue_write(struct cfg *cfg, int fd)
+{
+    int i;
+    int rc;
+
+    if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
+        printf("wbqueue_write: wrlock=%d\n", rc);
+        return;
+    }
+
+    VFORI(cfg->wbq, i) {
+        struct writeback *q = &VGET(cfg->wbq, i);
+        if (q->fd != fd)
+            continue;
+
+        DEBUGF("<<< write to #%d buf=%p len=%d\n", fd, q->buf, q->len);
+        if (write(fd, q->buf, q->len) != q->len)
+            continue;
+
+        free(q->buf);
+        q->buf = NULL;
+        q->fd = -1;
+        VREMOVE(cfg->wbq, i);
+        --i;
+    }
+
+    if (pthread_rwlock_unlock(&rwlock) != 0)
+        printf("wbqueue_write: 0 unlock FAILED\n");
+}
+
 inline void _queue_remove(struct rtu_desc *rtu, int n)
 {
     struct queue_list *q;
 
     if (!rtu)
         return;
+
+    rtu->toread = 0;
+    rtu->toread_off = 0;
+    if (rtu->toreadbuf)
+        free(rtu->toreadbuf);
+    rtu->toreadbuf = NULL;
 
     q = &VGET(rtu->q, n);
     free(q->buf);
@@ -538,15 +619,8 @@ reconnect:
                         errbuf[0] = q->tido[0];
                         errbuf[1] = q->tido[1];
                         errbuf[7] = q->function;
-                        if (write(q->resp_fd, errbuf, 9) < 0 && errno == EBADF) {
-                            q->resp_fd = -1;
-                        }
+                        _wbqueue_add(cfg, q->resp_fd, errbuf, sizeof(errbuf));
                     }
-                    ri->toread = 0;
-                    ri->toread_off = 0;
-                    if (ri->toreadbuf)
-                        free(ri->toreadbuf);
-                    ri->toreadbuf = NULL;
                     _queue_remove(ri, n);
                     n--;
                     continue;
@@ -559,14 +633,10 @@ reconnect:
                         if (ri->type == TCP) {
 #if 1
                             /* Revert TID back */
-                            p->buf[0] = ri->tido[0];
-                            p->buf[1] = ri->tido[1];
+                            p->buf[0] = q->tido[0];
+                            p->buf[1] = q->tido[1];
 #endif
-                            if (q->resp_fd >= 0) {
-                                if (write(q->resp_fd, p->buf, p->len) < 0 && errno == EBADF) {
-                                    q->resp_fd = -1;
-                                }
-                            }
+                            _wbqueue_add(cfg, q->resp_fd, p->buf, p->len);
                         } else if (ri->type == RTU) {
                             uint8_t tcp[520];
                             tcp[0] = q->tido[0];
@@ -576,28 +646,27 @@ reconnect:
                             tcp[5] = (p->len-2) & 0xff;
                             tcp[6] = q->src;
                             memcpy(tcp+7, p->buf+1, p->len-3);
-                            if (q->resp_fd >= 0) {
-                                if (write(q->resp_fd, tcp, p->len + 4) < 0 && errno == EBADF) {
-                                    q->resp_fd = -1;
-                                }
-                            }
+                            _wbqueue_add(cfg, q->resp_fd, tcp, p->len + 4);
                             dump(tcp, p->len + 4);
                         }
                         _queue_remove(ri, n);
                         n--;
                         continue;
                     } else if (q->stamp) {
+                        /* Query is not completed yet, check other */
+                        continue;
+                    } else if (ri->toread > 0) {
+                        DEBUGF("+++ request pending #%d: %d\n", ri->fd, ri->toread);
                         continue;
                     }
 
                     /* RTU Endpoint is alive */
                     if (ri->fd >= 0) {
 
+                    /* Do next request */
                     if (ri->type == TCP) {
 #if 1
                         /* Fixup TID */
-                        ri->tido[0] = q->buf[0];
-                        ri->tido[1] = q->buf[1];
                         q->buf[0] = ri->tid >> 8;
                         q->buf[1] = ri->tid & 0xff;
                         ri->tid++;
@@ -605,7 +674,7 @@ reconnect:
                         if (!ri->tid)
                             ri->tid ^= 1;
 #endif
-                        /* Make request to RTU */
+                        /* Make request to TCP */
                         if (write(ri->fd, q->buf, q->len) != q->len) {
                             perror("write() failed");
                         }
@@ -613,7 +682,9 @@ reconnect:
                         struct timeval tv;
                         gettimeofday(&tv, NULL);
 
+                        /* Nothing to read anymore, ready to transmit more (200msec delay) */
                         if (ri->toread <= 0 && ((tv.tv_sec - ri->tv.tv_sec) > 0 || (tv.tv_usec - ri->tv.tv_usec) > 200000)) {
+                            /* Make request to RTU */
                             write(ri->fd, q->buf, q->len);
                             // status register
                             if (q->buf[1] == 1 || q->buf[1] == 2) {
@@ -677,19 +748,16 @@ void *tcp_thread(void *p)
 
         for (n = 0; n < nfds; ++n) {
             int len;
-            if (!(evs[n].events & EPOLLIN)) {
-                if (evs[n].events & EPOLLHUP) {
-                    /* TODO: dealloc RTU by fd */
-                    close(evs[n].data.fd);
-                }
-                continue;
-            }
+
+            if (evs[n].events & EPOLLIN) {
 
             len = read(evs[n].data.fd, buf, 6);
             if (len == 0) {
 //c_close:
                 epoll_ctl(self->ep, EPOLL_CTL_DEL, evs[n].data.fd, NULL);
-                close(evs[n].data.fd);
+                perror("tcp_thread len=0");
+                wbqueue_free(self->cfg, evs[n].data.fd);
+                continue;
             } else if (len < 0) {
                 perror("Error occured");
             } else if (len == 6) {
@@ -730,6 +798,18 @@ void *tcp_thread(void *p)
                     if (len <= 0)
                         break;
                 }
+            }
+            }
+
+            if (evs[n].events & EPOLLOUT) {
+                wbqueue_write(self->cfg, evs[n].data.fd);
+            }
+
+            if (evs[n].events & EPOLLHUP) {
+                epoll_ctl(self->ep, EPOLL_CTL_DEL, evs[n].data.fd, NULL);
+                printf("epoll: %08x\n", evs[n].events);
+                perror("tcp_thread: EPOLLHUP");
+                wbqueue_free(self->cfg, evs[n].data.fd);
             }
         }
     }
@@ -948,7 +1028,7 @@ int main(int argc, char *argv[])
                 perror("setnonblocking()");
                 close(c);
             } else {
-                ev.events = EPOLLIN;
+                ev.events = EPOLLIN | EPOLLOUT;
                 ev.data.fd = c;
 //                fprintf(stderr, "%d Adding() %d %d\n", evs[n].data.fd, c, ((struct sockaddr_in *)&local)->sin_port);
 //                fprintf(stderr, "%d Adding() %d %d\n", ep, c, ((struct sockaddr_in6 *)&local)->sin6_port);

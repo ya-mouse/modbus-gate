@@ -23,6 +23,7 @@ struct cfg {
     int workers;
     char *sockfile;
     rtu_desc_v rtu_list;
+    writeback_v wbq;
     enum err err;
     yaml_parser_t parser;
 };
