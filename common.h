@@ -8,7 +8,7 @@
 #include "vect.h"
 
 #undef DEBUG
-//#define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define DEBUGF(x...) printf(x)
 #else
@@ -53,12 +53,14 @@ struct queue_list {
     uint8_t *buf;           /* request buffer */
     size_t len;             /* request length */
     time_t stamp;           /* timestamp of timeout: last_timestamp + timeout */
+    time_t expire;          /* timestamp of query expiration: last_timestamp + timeout */
     int16_t src;            /* source slave_id */
     uint8_t tido[2];
     uint8_t function;
 };
 
 struct writeback {
+    int ep;                 /* epoll descriptor */
     int fd;                 /* "response to" descriptor */
     uint8_t *buf;           /* request buffer */
     size_t len;             /* request length */
