@@ -92,14 +92,13 @@ out:
     return ri;
 }
 
-void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
+void _cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
 {
     int slave = 0;
     int func = 0;
     int addr = 0;
     int nb = 0;
     int i;
-    int rc;
     struct queue_list *q;
     struct cache_page *p;
     struct cache_page *new;
@@ -109,10 +108,6 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
         return;
     }
 
-    if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
-        printf("cache_update: wrlock=%d\n", rc);
-        return;
-    }
     /* TODO: Write (change register) request shouldn't be cached */
     /* Check for function type */
     // ...
@@ -151,8 +146,6 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
         if (q->buf[0] != buf[0] || q->buf[1] != buf[1]) {
             DEBUGF(">>> Wrong ordered response: %d expected %d\n",
                    (buf[0] << 8) | buf[1], (q->buf[0] << 8) | q->buf[1]);
-            if (pthread_rwlock_unlock(&rwlock) != 0)
-                printf("cache_update: 0 unlock FAILED\n");
             return;
         }
     }
@@ -213,6 +206,18 @@ update:
     /* TODO: TTL have to be configured via config for each RTU / slave */
 //    q->stamp = 0;
     p->ttd = time(NULL) + rtu->conf->ttl;
+}
+
+void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
+{
+    int rc;
+
+    if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
+        printf("cache_update: wrlock=%d\n", rc);
+        return;
+    }
+
+    _cache_update(rtu, buf, len);
 
     if (pthread_rwlock_unlock(&rwlock) != 0)
         printf("cache_update: unlock FAILED\n");
@@ -267,11 +272,11 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
         nb = (q->buf[4] << 8) | q->buf[5];
     }
 
-    //DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
+    DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
 
     while (p) {
-        DEBUGF("--> (%d,%d,%d+%d) <> (%d,%d,%d+%d)\n",
-               slave, func, addr, nb, p->slaveid, p->function, p->addr, p->len);
+//        DEBUGF("--> (%d,%d,%d+%d) <> (%d,%d,%d+%d)\n",
+//               slave, func, addr, nb, p->slaveid, p->function, p->addr, p->len);
         if (func == p->function && slave == p->slaveid && addr == p->addr)
             return p;
         p = p->next;
@@ -321,9 +326,13 @@ int queue_add(struct cfg *cfg,
     return -2;
 
 found:
-    DEBUGF("Adding sid=%d to queue (%d) len=%d fd=#%d\n", slave_id, VLEN(ri->q), len, fd);
+    DEBUGF("Adding sid=%d to queue (%d@%d) len=%d fd=#%d\n", slave_id, VLEN(ri->q), ri->fd, len, fd);
 
+    /* TODO: use gettimeofday() */
     q.stamp = 0;
+    q.expire = time(NULL) + 240.0;
+    /* /TODO */
+
     q.resp_fd = fd;
     DEBUGF("=== orig === %d\n", fd);
     dump(buf, len);
@@ -393,7 +402,8 @@ void wbqueue_free(struct cfg *cfg, int fd)
         free(q->buf);
         q->buf = NULL;
         q->fd = -1;
-        VREMOVE(cfg->wbq, i);
+//        VREMOVE(cfg->wbq, i);
+        VDELETE_ORDER(cfg->wbq, i);
         --i;
     }
 
@@ -419,13 +429,13 @@ void wbqueue_write(struct cfg *cfg, int fd)
             continue;
 
         DEBUGF("<<< write to #%d buf=%p len=%d\n", fd, q->buf, q->len);
-        if (write(fd, q->buf, q->len) != q->len)
-            continue;
+        write(fd, q->buf, q->len);
 
         free(q->buf);
         q->buf = NULL;
         q->fd = -1;
-        VREMOVE(cfg->wbq, i);
+//        VREMOVE(cfg->wbq, i);
+        VDELETE_ORDER(cfg->wbq, i);
         --i;
     }
 
@@ -449,7 +459,8 @@ inline void _queue_remove(struct rtu_desc *rtu, int n)
     q = &VGET(rtu->q, n);
     free(q->buf);
     q->buf = NULL;
-    VREMOVE(rtu->q, n);
+//    VREMOVE(rtu->q, n);
+    VDELETE_ORDER(rtu->q, n);
 }
 
 void *rtu_thread(void *arg)
@@ -611,14 +622,18 @@ reconnect:
             for (n = 0; n < VLEN(*qv); ++n) {
                 /* Check for timeouted items */
                 q = &VGET(*qv, n);
-                if (q->stamp && q->stamp <= cur_time) {
-                    uint8_t errbuf[9] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x83 };
+                if ((q->stamp && q->stamp <= cur_time) || (q->expire <= cur_time)) {
                     // build response with TIMEOUT error message
-                    DEBUGF("Remove from queue %p: %d %ld %ld\n", q, q->buf[6], q->stamp, cur_time);
+                    uint8_t errbuf[9] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x83 };
+
+                    DEBUGF("Remove from queue(%d) %p: sid=%d stamp=%ld,exp=%ld %ld\n", VLEN(*qv), q, q->buf[6], q->stamp, q->expire, cur_time);
+                    /* Update cache */
+                    _cache_update(ri, errbuf, sizeof(errbuf));
+
+                    errbuf[0] = q->tido[0];
+                    errbuf[1] = q->tido[1];
+                    errbuf[7] = q->function;
                     if (q->resp_fd >= 0) {
-                        errbuf[0] = q->tido[0];
-                        errbuf[1] = q->tido[1];
-                        errbuf[7] = q->function;
                         _wbqueue_add(cfg, q->resp_fd, errbuf, sizeof(errbuf));
                     }
                     _queue_remove(ri, n);
@@ -683,11 +698,13 @@ reconnect:
                         gettimeofday(&tv, NULL);
 
                         /* Nothing to read anymore, ready to transmit more (200msec delay) */
-                        if (ri->toread <= 0 && ((tv.tv_sec - ri->tv.tv_sec) > 0 || (tv.tv_usec - ri->tv.tv_usec) > 200000)) {
+                        if (ri->toread <= 0 && ((tv.tv_sec - ri->tv.tv_sec) > 0 || (tv.tv_usec - ri->tv.tv_usec) > 35000)) {
                             /* Make request to RTU */
                             write(ri->fd, q->buf, q->len);
                             // status register
-                            if (q->buf[1] == 1 || q->buf[1] == 2) {
+                            if (q->buf[1] == 1) {
+                                ri->toread = ((q->buf[4] << 8) | q->buf[5]) + 5;
+                            } else if (q->buf[1] == 2) {
                                 ri->toread = 6;
                             } else {
                                 ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
@@ -700,7 +717,7 @@ reconnect:
                             continue;
                         }
                     }
-                    DEBUGF("Write to RTU: #%d l=%d\n", ri->fd, q->len);
+                    DEBUGF("Write to RTU: #%d sid=%d l=%d\n", ri->fd, q->src, q->len);
 
                     }
                     q->stamp = time(NULL) + ri->timeout;
