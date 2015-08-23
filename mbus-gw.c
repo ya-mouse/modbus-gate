@@ -173,7 +173,7 @@ void _cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
                     rtu->p->next = p;
                     p->prev = rtu->p;
                     p = rtu->p;
-                    goto fill;
+                    goto new_head_page;
                 }
                 p = p->prev;
                 break;
@@ -189,11 +189,16 @@ void _cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
         p = new;
     }
 
-fill:
+new_head_page:
     p->function = func;
     p->slaveid = slave;
     p->addr = addr;
-    p->buf = malloc(len);
+    if (p->buf) {
+        if (p->len != len)
+            p->buf = realloc(p->buf, len);
+    } else {
+        p->buf = malloc(len);
+    }
     p->len = len;
 
 update:
