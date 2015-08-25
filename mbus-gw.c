@@ -453,8 +453,8 @@ void wbqueue_free(struct cfg *cfg, int fd)
         free(q->buf);
         q->buf = NULL;
         q->fd = -1;
-        VREMOVE(cfg->wbq, i);
-//        VDELETE_ORDER(cfg->wbq, i);
+//        VREMOVE(cfg->wbq, i);
+        VDELETE_ORDER(cfg->wbq, i);
         --i;
     }
 
@@ -487,8 +487,8 @@ void wbqueue_write(struct cfg *cfg, int fd)
         free(q->buf);
         q->buf = NULL;
         q->fd = -1;
-        VREMOVE(cfg->wbq, i);
-//        VDELETE_ORDER(cfg->wbq, i);
+//        VREMOVE(cfg->wbq, i);
+        VDELETE_ORDER(cfg->wbq, i);
         --i;
     }
 
@@ -516,8 +516,8 @@ inline void _queue_remove(struct rtu_desc *rtu, int n)
     DEBUGF("_queue_remove: q->buf=%p l=%d\n", q->buf, q->len);
     free(q->buf);
     q->buf = NULL;
-    VREMOVE(rtu->q, n);
-//    VDELETE_ORDER(rtu->q, n);
+//    VREMOVE(rtu->q, n);
+    VDELETE_ORDER(rtu->q, n);
     DEBUGF("-- ok\n");
 }
 
