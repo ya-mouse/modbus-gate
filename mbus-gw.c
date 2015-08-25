@@ -608,7 +608,7 @@ void *rtu_thread(void *arg)
                 len = read(evs[n].data.fd, ri->toreadbuf+ri->toread_off, ri->toread);
                 DEBUGF("*** read %p + %d, %d\n", ri->toreadbuf, ri->toread_off, ri->toread);
             }
-            if (len <= 0) {
+            if (len < 0) {
 reconnect:
                 /* TODO: reset "retries" counters after a delay */
                 /* Re-open required */
