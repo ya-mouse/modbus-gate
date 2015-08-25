@@ -57,6 +57,20 @@ static void dump(const uint8_t *buf, size_t len)
 #endif
 }
 
+static void dumpr(const uint8_t *buf, size_t len)
+{
+    int i;
+    printf("--- %d (%p) ---\n", len, buf);
+    for (i=1; i<=len; ++i) {
+        printf("%02x ", buf[i-1]);
+        if (!(i % 16))
+            printf("\n");
+    }
+    if ((i % 16))
+        printf("\n");
+    printf("=== %d ===\n", len);
+}
+
 struct rtu_desc *rtu_by_slaveid(struct cfg *cfg, int slave_id)
 {
     struct slave_map *mi;
@@ -225,9 +239,11 @@ update:
         memcpy(p->buf, buf, len);
     } else if (rtu->type == RTU) {
         /* Remove CRC */
-        DEBUGF("=== UP %d <> %d\n", p->len, len-2);
+        DEBUGF("=== UP %d <> %d\e[1;34m\n", p->len, len-2);
         p->len -= 2;
         memcpy(p->buf, buf, p->len);
+        dump(p->buf, p->len);
+        DEBUGF("\e[0m");
     }
     /* TODO: TTL have to be configured via config for each RTU / slave */
 //    q->stamp = 0;
@@ -240,8 +256,8 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
     struct queue_list *q;
 
     if (len < 6) {
-        printf("cache_update: too short MBUS RTU=%d\n", len);
-        dump(buf, len);
+        printf("cache_update: too short MBUS RTU=%d #%d\n", len, rtu->fd);
+        dumpr(buf, len);
         return;
     }
 
@@ -363,9 +379,9 @@ found:
     /* /TODO */
 
     q.resp_fd = fd;
-    DEBUGF("=== orig === %d\n", fd);
+    DEBUGF("=== orig === %d\e[1;33m\n", fd);
     dump(buf, len);
-    DEBUGF("=== added === %d\n", fd);
+    DEBUGF("\e[0m=== added === %d\n", fd);
     if (ri->type == RTU) {
         uint16_t crc;
         q.buf = calloc(1, len-4);
@@ -459,11 +475,11 @@ void wbqueue_write(struct cfg *cfg, int fd)
         if (q->fd != fd)
             continue;
 
-        DEBUGF("<<< write to #%d buf=%p len=%d\n", fd, q->buf, q->len);
+        DEBUGF("\e[1;32m<<< write to #%d buf=%p len=%d\n", fd, q->buf, q->len);
         write(fd, q->buf, q->len);
         dump(q->buf, q->len);
 
-        DEBUGF("wbqueue_write: q->buf=%p\n", q->buf);
+        DEBUGF("\e[0mwbqueue_write: q->buf=%p\n", q->buf);
         free(q->buf);
         q->buf = NULL;
         q->fd = -1;
@@ -578,9 +594,11 @@ void *rtu_thread(void *arg)
                 len = read(evs[n].data.fd, buf, 512);
                 if (len <= 0)
                     goto reconnect;
-                DEBUGF("Unordered data received\n");
-                dump(buf, len);
+                printf("Unordered data received #%d\n", ri->fd);
+                dumpr(buf, len);
                 free(buf);
+                /* Try to recover */
+                cache_update(ri, buf, len);
                 continue;
             } else {
                 len = read(evs[n].data.fd, ri->toreadbuf+ri->toread_off, ri->toread);
@@ -679,13 +697,15 @@ reconnect:
                         tcp[0] = q->tido[0];
                         tcp[1] = q->tido[1];
                         tcp[2] = tcp[3] = 0;
-                        tcp[4] = ((p->len-2) >> 8) & 0xff;
-                        tcp[5] = (p->len-2) & 0xff;
+                        tcp[4] = (p->len >> 8) & 0xff;
+                        tcp[5] =  p->len & 0xff;
                         tcp[6] = q->src;
-                        if (p->len < 509) {
-                            memcpy(tcp+7, p->buf+1, p->len-3);
-                            _wbqueue_add(cfg, q->resp_fd, tcp, p->len + 4);
-                            dump(tcp, p->len + 4);
+                        if (p->len < 511) {
+                            memcpy(tcp+7, p->buf+1, p->len-1);
+                            _wbqueue_add(cfg, q->resp_fd, tcp, p->len + 6);
+                            DEBUGF("\e[1;36m");
+                            dump(tcp, p->len + 6);
+                            DEBUGF("\e[0m");
                         } else {
                             printf("Too big packet(#%d): %d\n", ri->fd, p->len);
                         }
@@ -695,17 +715,20 @@ reconnect:
                     continue;
                 } else if ((q->stamp && q->stamp <= cur_time) || (q->expire <= cur_time)) {
                     // build response with TIMEOUT error message
-                    uint8_t errbuf[9] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x83 };
+                    uint8_t errbuf[] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x83, 0x00, 0x00 };
 
                     DEBUGF("Remove from queue(%d) %p: sid=%d stamp=%ld,exp=%ld %ld\n", VLEN(*qv), q, q->buf[6], q->stamp, q->expire, cur_time);
-                    /* Update cache */
-                    _cache_update(ri, q, errbuf, sizeof(errbuf));
 
                     errbuf[0] = q->tido[0];
                     errbuf[1] = q->tido[1];
+                    errbuf[6] = q->buf[6];
                     errbuf[7] = q->function;
+
+                    /* Update cache with fective CRC */
+                    _cache_update(ri, q, errbuf + 6, 5);
+
                     if (q->resp_fd >= 0) {
-                        _wbqueue_add(cfg, q->resp_fd, errbuf, sizeof(errbuf));
+                        _wbqueue_add(cfg, q->resp_fd, errbuf, sizeof(errbuf) - 2);
                     }
                     _queue_remove(ri, n);
                     n--;
