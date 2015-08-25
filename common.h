@@ -57,6 +57,8 @@ struct queue_list {
     int16_t src;            /* source slave_id */
     uint8_t tido[2];
     uint8_t function;
+    uint8_t answered;
+    uint8_t requested;
 };
 
 struct writeback {

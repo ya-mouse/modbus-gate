@@ -248,6 +248,8 @@ update:
     /* TODO: TTL have to be configured via config for each RTU / slave */
 //    q->stamp = 0;
     p->ttd = time(NULL) + rtu->conf->ttl;
+
+    q->answered = 1;
 }
 
 void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
@@ -268,7 +270,7 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
 
     /* Find appropriate query page */
     VFOREACH(rtu->q, q) {
-        if (q->buf[0] != buf[0])
+        if (q->buf[0] != buf[0] || q->answered || !q->requested)
             continue;
 
         _cache_update(rtu, q, buf, len);
@@ -375,6 +377,8 @@ found:
 
     /* TODO: use gettimeofday() */
     q.stamp = 0;
+    q.answered = 0;
+    q.requested = 0;
     q.expire = time(NULL) + 240.0;
     /* /TODO */
 
@@ -776,6 +780,8 @@ reconnect:
                                 ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
                             }
                             ri->toreadbuf = calloc(1, ri->toread);
+                            q->requested = 1;
+//                            q->answered = 0;
                             dump(q->buf, q->len);
                             DEBUGF("! toreadbuf=%p (%d)\n", ri->toreadbuf, ri->toread);
                             ri->toread_off = 0;
