@@ -41,6 +41,22 @@
 
 static pthread_rwlock_t rwlock;
 
+static void dump(const uint8_t *buf, size_t len)
+{
+#ifdef DEBUG
+    int i;
+    printf("--- %d (%p) ---\n", len, buf);
+    for (i=1; i<=len; ++i) {
+        printf("%02x ", buf[i-1]);
+        if (!(i % 16))
+            printf("\n");
+    }
+    if ((i % 16))
+        printf("\n");
+    printf("=== %d ===\n", len);
+#endif
+}
+
 struct rtu_desc *rtu_by_slaveid(struct cfg *cfg, int slave_id)
 {
     struct slave_map *mi;
@@ -92,18 +108,17 @@ out:
     return ri;
 }
 
-void _cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
+void _cache_update(struct rtu_desc *rtu, struct queue_list *q, const uint8_t *buf, size_t len)
 {
     int slave = 0;
     int func = 0;
     int addr = 0;
     int nb = 0;
     int i;
-    struct queue_list *q;
     struct cache_page *p;
     struct cache_page *new;
 
-    if (!rtu || !VLEN(rtu->q)) {
+    if (!rtu || !q) {
         DEBUGF("rtu=%p qlen=%d\n", rtu, (rtu ? VLEN(rtu->q) : -1));
         return;
     }
@@ -112,7 +127,6 @@ void _cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
     /* Check for function type */
     // ...
 
-    q = &VGET(rtu->q, 0);
     /* TODO: handle different RTU types */
     if (rtu->type == TCP) {
         slave = q->buf[6];
@@ -155,6 +169,7 @@ void _cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
 
     if (!rtu->p) {
         p = rtu->p = calloc(1, sizeof(struct cache_page));
+        DEBUGF("! p=%p\n", p);
         p->next = NULL;
         p->prev = NULL;
     } else {
@@ -162,14 +177,15 @@ void _cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
         while (p->next != NULL) {
             if (func == p->function && slave == p->slaveid && addr == p->addr) {
                 /* Update page if it has the same constraints */
-//                printf("update %p (%d,%d)\n", p, nb, p->len);
+                DEBUGF("=== update %p (%d,%d)\n", p, nb, p->len);
                 if (nb == ((buf[10] << 8) | buf[11])) //p->len)
                     goto update;
                 break;
-            } else if (addr > p->addr) {
+            } else if ((addr > p->addr && slave == p->slaveid) || slave < p->slaveid) {
                 /* Insert before */
                 if (!p->prev) {
                     rtu->p = calloc(1, sizeof(struct cache_page));
+                    DEBUGF("! rtu->p=%p\n", rtu->p);
                     rtu->p->next = p;
                     p->prev = rtu->p;
                     p = rtu->p;
@@ -180,7 +196,8 @@ void _cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
             }
             p = p->next;
         }
-        new = malloc(sizeof(struct cache_page));
+        new = calloc(1, sizeof(struct cache_page));
+        DEBUGF("! new=%p\n", new);
         new->next = p->next;
         if (new->next)
             new->next->prev = new;
@@ -196,8 +213,10 @@ new_head_page:
     if (p->buf) {
         if (p->len != len)
             p->buf = realloc(p->buf, len);
+            DEBUGF("! p->buf+%p\n", p->buf);
     } else {
-        p->buf = malloc(len);
+        p->buf = calloc(1, len);
+        DEBUGF("! new p->buf=%p\n", p->buf);
     }
     p->len = len;
 
@@ -206,7 +225,9 @@ update:
         memcpy(p->buf, buf, len);
     } else if (rtu->type == RTU) {
         /* Remove CRC */
-        memcpy(p->buf, buf, len-2);
+        DEBUGF("=== UP %d <> %d\n", p->len, len-2);
+        p->len -= 2;
+        memcpy(p->buf, buf, p->len);
     }
     /* TODO: TTL have to be configured via config for each RTU / slave */
 //    q->stamp = 0;
@@ -216,13 +237,27 @@ update:
 void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
 {
     int rc;
+    struct queue_list *q;
+
+    if (len < 6) {
+        printf("cache_update: too short MBUS RTU=%d\n", len);
+        dump(buf, len);
+        return;
+    }
 
     if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
         printf("cache_update: wrlock=%d\n", rc);
         return;
     }
 
-    _cache_update(rtu, buf, len);
+    /* Find appropriate query page */
+    VFOREACH(rtu->q, q) {
+        if (q->buf[0] != buf[0])
+            continue;
+
+        _cache_update(rtu, q, buf, len);
+        break;
+    }
 
     if (pthread_rwlock_unlock(&rwlock) != 0)
         printf("cache_update: unlock FAILED\n");
@@ -235,6 +270,7 @@ inline struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
     if (!rtu || !p)
         return NULL;
 
+    DEBUGF("_page_free: p->buf=%p\n", p->buf);
     free(p->buf);
     if (!p->prev) {
         rtu->p = p->next;
@@ -246,7 +282,9 @@ inline struct cache_page *_page_free(struct rtu_desc *rtu, struct cache_page *p)
             p->next->prev = p->prev;
     }
     next = p->next;
+    DEBUGF("free p=%p\n", p);
     free(p);
+    DEBUGF("-- ok\n");
 
     return next;
 }
@@ -277,33 +315,19 @@ struct cache_page *_cache_find(struct rtu_desc *rtu, struct queue_list *q)
         nb = (q->buf[4] << 8) | q->buf[5];
     }
 
-    DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
+//    DEBUGF("search for sid=%d addr=%d nb=%d\n", slave, addr, nb);
 
     while (p) {
 //        DEBUGF("--> (%d,%d,%d+%d) <> (%d,%d,%d+%d)\n",
 //               slave, func, addr, nb, p->slaveid, p->function, p->addr, p->len);
+        if (slave < p->slaveid)
+            return NULL;
         if (func == p->function && slave == p->slaveid && addr == p->addr)
             return p;
         p = p->next;
     }
 
     return p;
-}
-
-static void dump(const uint8_t *buf, size_t len)
-{
-#ifdef DEBUG
-    int i;
-    printf("--- %d ---\n", len);
-    for (i=1; i<=len; ++i) {
-        printf("%02x ", buf[i-1]);
-        if (!(i % 16))
-            printf("\n");
-    }
-    if ((i % 16))
-        printf("\n");
-    printf("=== %d ===\n", len);
-#endif
 }
 
 int queue_add(struct cfg *cfg,
@@ -331,7 +355,7 @@ int queue_add(struct cfg *cfg,
     return -2;
 
 found:
-    DEBUGF("Adding sid=%d to queue (%d@%d) len=%d fd=#%d\n", slave_id, VLEN(ri->q), ri->fd, len, fd);
+    DEBUGF("Adding sid=%d to queue (%d@%d) len=%d fn=%d fd=#%d\n", slave_id, VLEN(ri->q), ri->fd, len, buf[7], fd);
 
     /* TODO: use gettimeofday() */
     q.stamp = 0;
@@ -344,7 +368,8 @@ found:
     DEBUGF("=== added === %d\n", fd);
     if (ri->type == RTU) {
         uint16_t crc;
-        q.buf = malloc(len-4);
+        q.buf = calloc(1, len-4);
+        DEBUGF("! q.buf=%p (%d)\n", q.buf, len-4);
         q.len = len-4;
         q.tido[0] = buf[0];
         q.tido[1] = buf[1];
@@ -356,7 +381,7 @@ found:
         memcpy(q.buf+q.len-2, &crc, 2);
         dump(q.buf, q.len);
     } else {
-        q.buf = malloc(len);
+        q.buf = calloc(1, len);
         q.len = len;
         q.src = mi->src;
         memcpy(q.buf, buf, len);
@@ -381,11 +406,11 @@ void _wbqueue_add(struct cfg *cfg, int fd, uint8_t *buf, int len)
 
     wb.fd = fd;
     wb.len = len;
-    wb.buf = malloc(len);
+    wb.buf = calloc(1, len);
     memcpy(wb.buf, buf, len);
 
-    DEBUGF(">>> queue(%d) to %d buf=%p len=%d\n", VLEN(cfg->wbq), fd, buf, len);
     VADD(cfg->wbq, wb);
+    DEBUGF(">>> queue(%d) to %d ! wb.buf=%p buf=%p len=%d\n", VLEN(cfg->wbq), fd, wb.buf, buf, len);
 }
 
 void wbqueue_free(struct cfg *cfg, int fd)
@@ -404,11 +429,12 @@ void wbqueue_free(struct cfg *cfg, int fd)
         if (q->fd != fd)
             continue;
 
+        DEBUGF("wbqueue_free: q->buf=%p\n", q->buf);
         free(q->buf);
         q->buf = NULL;
         q->fd = -1;
-//        VREMOVE(cfg->wbq, i);
-        VDELETE_ORDER(cfg->wbq, i);
+        VREMOVE(cfg->wbq, i);
+//        VDELETE_ORDER(cfg->wbq, i);
         --i;
     }
 
@@ -435,12 +461,14 @@ void wbqueue_write(struct cfg *cfg, int fd)
 
         DEBUGF("<<< write to #%d buf=%p len=%d\n", fd, q->buf, q->len);
         write(fd, q->buf, q->len);
+        dump(q->buf, q->len);
 
+        DEBUGF("wbqueue_write: q->buf=%p\n", q->buf);
         free(q->buf);
         q->buf = NULL;
         q->fd = -1;
-//        VREMOVE(cfg->wbq, i);
-        VDELETE_ORDER(cfg->wbq, i);
+        VREMOVE(cfg->wbq, i);
+//        VDELETE_ORDER(cfg->wbq, i);
         --i;
     }
 
@@ -455,17 +483,22 @@ inline void _queue_remove(struct rtu_desc *rtu, int n)
     if (!rtu)
         return;
 
+    if (rtu->toreadbuf) {
+        DEBUGF("_queue_remove: toreadbuf=%p toread_off=%d toread=%d\n", rtu->toreadbuf, rtu->toread_off, rtu->toread);
+        free(rtu->toreadbuf);
+        DEBUGF("-- ok\n");
+    }
     rtu->toread = 0;
     rtu->toread_off = 0;
-    if (rtu->toreadbuf)
-        free(rtu->toreadbuf);
     rtu->toreadbuf = NULL;
 
     q = &VGET(rtu->q, n);
+    DEBUGF("_queue_remove: q->buf=%p l=%d\n", q->buf, q->len);
     free(q->buf);
     q->buf = NULL;
-//    VREMOVE(rtu->q, n);
-    VDELETE_ORDER(rtu->q, n);
+    VREMOVE(rtu->q, n);
+//    VDELETE_ORDER(rtu->q, n);
+    DEBUGF("-- ok\n");
 }
 
 void *rtu_thread(void *arg)
@@ -551,6 +584,7 @@ void *rtu_thread(void *arg)
                 continue;
             } else {
                 len = read(evs[n].data.fd, ri->toreadbuf+ri->toread_off, ri->toread);
+                DEBUGF("*** read %p + %d, %d\n", ri->toreadbuf, ri->toread_off, ri->toread);
             }
             if (len <= 0) {
 reconnect:
@@ -627,13 +661,45 @@ reconnect:
             for (n = 0; n < VLEN(*qv); ++n) {
                 /* Check for timeouted items */
                 q = &VGET(*qv, n);
-                if ((q->stamp && q->stamp <= cur_time) || (q->expire <= cur_time)) {
+
+                /* Check for cache page */
+                p = _cache_find(ri, q);
+                if (p) {
+                    DEBUGF("Found %p, respond to #%d len=%d\n",
+                           q, q->resp_fd, p->len);
+                    if (ri->type == TCP) {
+#if 1
+                        /* Revert TID back */
+                        p->buf[0] = q->tido[0];
+                        p->buf[1] = q->tido[1];
+#endif
+                        _wbqueue_add(cfg, q->resp_fd, p->buf, p->len);
+                    } else if (ri->type == RTU) {
+                        uint8_t tcp[520];
+                        tcp[0] = q->tido[0];
+                        tcp[1] = q->tido[1];
+                        tcp[2] = tcp[3] = 0;
+                        tcp[4] = ((p->len-2) >> 8) & 0xff;
+                        tcp[5] = (p->len-2) & 0xff;
+                        tcp[6] = q->src;
+                        if (p->len < 509) {
+                            memcpy(tcp+7, p->buf+1, p->len-3);
+                            _wbqueue_add(cfg, q->resp_fd, tcp, p->len + 4);
+                            dump(tcp, p->len + 4);
+                        } else {
+                            printf("Too big packet(#%d): %d\n", ri->fd, p->len);
+                        }
+                    }
+                    _queue_remove(ri, n);
+                    n--;
+                    continue;
+                } else if ((q->stamp && q->stamp <= cur_time) || (q->expire <= cur_time)) {
                     // build response with TIMEOUT error message
                     uint8_t errbuf[9] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x83 };
 
                     DEBUGF("Remove from queue(%d) %p: sid=%d stamp=%ld,exp=%ld %ld\n", VLEN(*qv), q, q->buf[6], q->stamp, q->expire, cur_time);
                     /* Update cache */
-                    _cache_update(ri, errbuf, sizeof(errbuf));
+                    _cache_update(ri, q, errbuf, sizeof(errbuf));
 
                     errbuf[0] = q->tido[0];
                     errbuf[1] = q->tido[1];
@@ -644,44 +710,16 @@ reconnect:
                     _queue_remove(ri, n);
                     n--;
                     continue;
-                } else {
-                    /* Check for cache page */
-                    p = _cache_find(ri, q);
-                    if (p) {
-                        DEBUGF("Found %p, respond to #%d len=%d\n",
-                               q, q->resp_fd, p->len);
-                        if (ri->type == TCP) {
-#if 1
-                            /* Revert TID back */
-                            p->buf[0] = q->tido[0];
-                            p->buf[1] = q->tido[1];
-#endif
-                            _wbqueue_add(cfg, q->resp_fd, p->buf, p->len);
-                        } else if (ri->type == RTU) {
-                            uint8_t tcp[520];
-                            tcp[0] = q->tido[0];
-                            tcp[1] = q->tido[1];
-                            tcp[2] = tcp[3] = 0;
-                            tcp[4] = ((p->len-2) >> 8) & 0xff;
-                            tcp[5] = (p->len-2) & 0xff;
-                            tcp[6] = q->src;
-                            memcpy(tcp+7, p->buf+1, p->len-3);
-                            _wbqueue_add(cfg, q->resp_fd, tcp, p->len + 4);
-                            dump(tcp, p->len + 4);
-                        }
-                        _queue_remove(ri, n);
-                        n--;
-                        continue;
-                    } else if (q->stamp) {
-                        /* Query is not completed yet, check other */
-                        continue;
-                    } else if (ri->toread > 0) {
-                        DEBUGF("+++ request pending #%d: %d\n", ri->fd, ri->toread);
-                        continue;
-                    }
+                } else if (q->stamp) {
+                    /* Query is not completed yet, check other */
+                    continue;
+                } else if (ri->toread > 0) {
+                    DEBUGF("+++ request pending #%d: %d\n", ri->fd, ri->toread);
+                    continue;
+                }
 
-                    /* RTU Endpoint is alive */
-                    if (ri->fd >= 0) {
+                /* RTU Endpoint is alive */
+                if (ri->fd >= 0) {
 
                     /* Do next request */
                     if (ri->type == TCP) {
@@ -714,7 +752,9 @@ reconnect:
                             } else {
                                 ri->toread = ((q->buf[4] << 8) | q->buf[5]) * 2 + 5;
                             }
-                            ri->toreadbuf = malloc(ri->toread);
+                            ri->toreadbuf = calloc(1, ri->toread);
+                            dump(q->buf, q->len);
+                            DEBUGF("! toreadbuf=%p (%d)\n", ri->toreadbuf, ri->toread);
                             ri->toread_off = 0;
                             DEBUGF("toread(#%d): %d\n", ri->fd, ri->toread);
                         } else {
@@ -724,10 +764,9 @@ reconnect:
                     }
                     DEBUGF("Write to RTU: #%d sid=%d l=%d\n", ri->fd, q->src, q->len);
 
-                    }
-                    q->stamp = time(NULL) + ri->timeout;
-                    break;
                 }
+                q->stamp = time(NULL) + ri->timeout;
+                break;
             }
         }
 

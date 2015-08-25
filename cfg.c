@@ -426,6 +426,7 @@ struct cfg *cfg_load(const char *fname)
     cfg->workers = 1; //CFG_DEFAULT_WORKERS;
     cfg->ttl = CFG_DEFAULT_TTL;
     cfg->sockfile = strdup(CFG_DEFAULT_SOCKFILE);
+    VINIT(cfg->wbq);
 
 #ifndef _NUTTX_BUILD
     yaml_parser_initialize(&cfg->parser);
