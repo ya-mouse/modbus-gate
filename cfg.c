@@ -438,6 +438,7 @@ struct cfg *cfg_load(const char *fname)
 #else
     VINIT(cfg->rtu_list);
     {
+      int i;
       struct rtu_desc r;
       struct slave_map map;
       memset(&r, 0, sizeof(struct rtu_desc));
@@ -447,9 +448,11 @@ struct cfg *cfg_load(const char *fname)
       r.timeout = RTU_TIMEOUT;
       r.cfg.serial.devname = strdup("/dev/ttyS1");
       r.cfg.serial.t.c_cflag = CS8 | B9600;
-      map.src = 1;
-      map.dst = 1;
-      VADD(r.slave_id, map);
+      for (i=1; i<=32; i++) {
+        map.src = i;
+        map.dst = i;
+        VADD(r.slave_id, map);
+      }
       VADD(cfg->rtu_list, r);
     }
 #endif
