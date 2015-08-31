@@ -550,12 +550,12 @@ void *rtu_thread(void *arg)
     for (;;) {
         int n;
         time_t cur_time;
-        int nfds = epoll_wait(ep, evs, VLEN(cfg->rtu_list), 10);
-        if (nfds == -1) {
+        int nfds = epoll_wait(ep, evs, VLEN(cfg->rtu_list), 100);
+        if (nfds == -1 && errno != EAGAIN) {
             if (errno == EINTR)
                 continue;
             perror("epoll_wait(rtu) failed");
-            goto err;
+//            goto err;
         }
 
 #if 0
@@ -631,7 +631,7 @@ reconnect:
 #endif
 
             if (ri->type == RTU) {
-                if ((ri->toreadbuf[1] & 0xf0) == 0x80) {
+                if ((ri->toreadbuf[1] & 0x80) == 0x80) {
                     DEBUGF("...exception(#%d): %02x\n", ri->fd, ri->toreadbuf[1]);
                     ri->toread = 0;
                     ri->toread_off += len;
@@ -719,14 +719,18 @@ reconnect:
                     continue;
                 } else if ((q->stamp && q->stamp <= cur_time) || (q->expire <= cur_time)) {
                     // build response with TIMEOUT error message
-                    uint8_t errbuf[] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x83, 0x00, 0x00 };
+                    uint8_t errbuf[] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x05, 0x00, 0x00 };
 
                     DEBUGF("Remove from queue(%d) %p: sid=%d stamp=%ld,exp=%ld %ld\n", VLEN(*qv), q, q->buf[6], q->stamp, q->expire, cur_time);
 
                     errbuf[0] = q->tido[0];
                     errbuf[1] = q->tido[1];
                     errbuf[6] = q->buf[6];
-                    errbuf[7] = q->function;
+                    errbuf[7] = q->function | 0x80;
+
+                    /* Slave is busy */
+                    if (q->expire <= cur_time)
+                        errbuf[8] = 0x06;
 
                     /* Update cache with fective CRC */
                     _cache_update(ri, q, errbuf + 6, 5);
@@ -828,7 +832,7 @@ void *tcp_thread(void *p)
         int nfds = epoll_wait(self->ep, evs, MAX_EVENTS, -1);
 #endif
 
-        if (nfds == -1) {
+        if (nfds == -1 && errno != EAGAIN) {
             if (errno == EINTR)
                 continue;
             perror("epoll_wait(tcp) failed");
@@ -991,9 +995,9 @@ int main(int argc, char *argv[])
     name.sun_family = AF_LOCAL;
     strcpy(name.sun_path, cfg->sockfile);
 
+#ifndef _NUTTX_BUILD
     signal(SIGPIPE, SIG_IGN);
 
-#ifndef _NUTTX_BUILD
     /* Bind to IPv6 */
     if (bind(sd, (struct sockaddr *)&sin6, sizeof(sin6)) < 0) {
         perror("bind(sd) failed");
