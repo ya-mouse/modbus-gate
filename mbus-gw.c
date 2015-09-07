@@ -41,6 +41,8 @@
 
 static pthread_rwlock_t rwlock;
 
+void _wbqueue_add(struct cfg *cfg, int fd, uint8_t *buf, int len);
+
 static void dump(const uint8_t *buf, size_t len)
 {
 #ifdef DEBUG
@@ -257,7 +259,7 @@ void cache_update(struct rtu_desc *rtu, const uint8_t *buf, size_t len)
     int rc;
     struct queue_list *q;
 
-    if (len < 6) {
+    if (len < 5) {
         printf("cache_update: too short MBUS RTU=%d #%d\n", len, rtu->fd);
         dumpr(buf, len);
         return;
@@ -375,6 +377,23 @@ int queue_add(struct cfg *cfg,
 found:
     DEBUGF("Adding sid=%d to queue (%d@%d) len=%d fn=%d fd=#%d\n", slave_id, VLEN(ri->q), ri->fd, len, buf[7], fd);
 
+    if (VLEN(ri->q) >= 150) {
+        // build response with TIMEOUT error message
+        uint8_t errbuf[] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x05 };
+
+        errbuf[0] = buf[0];
+        errbuf[1] = buf[1];
+        errbuf[6] = buf[6];
+        errbuf[7] = buf[7] | 0x80;
+
+        /* Slave is busy */
+        errbuf[8] = 0x06;
+
+        _wbqueue_add(cfg, fd, errbuf, sizeof(errbuf));
+        DEBUGF("...queue limit reached\n");
+        goto unlock;
+    }
+
     /* TODO: use gettimeofday() */
     q.stamp = 0;
     q.answered = 0;
@@ -411,6 +430,7 @@ found:
 
     VADD(ri->q, q);
 
+unlock:
     if (pthread_rwlock_unlock(&rwlock) != 0)
         printf("queue_add: 0 unlock FAILED\n");
 
@@ -593,16 +613,15 @@ void *rtu_thread(void *arg)
                 continue;
             }
 
-            if (ri->toreadbuf == NULL) {
+            if (ri->toreadbuf == NULL || ri->toread == 0) {
                 uint8_t *buf = malloc(512);
                 len = read(evs[n].data.fd, buf, 512);
                 if (len <= 0)
                     goto reconnect;
                 printf("Unordered data received #%d\n", ri->fd);
                 dumpr(buf, len);
-                free(buf);
-                /* Try to recover */
                 cache_update(ri, buf, len);
+                free(buf);
                 continue;
             } else {
                 len = read(evs[n].data.fd, ri->toreadbuf+ri->toread_off, ri->toread);
@@ -631,7 +650,7 @@ reconnect:
 #endif
 
             if (ri->type == RTU) {
-                if ((ri->toreadbuf[1] & 0x80) == 0x80) {
+                if ((ri->toreadbuf[1] & 0xf0) == 0x80) {
                     DEBUGF("...exception(#%d): %02x\n", ri->fd, ri->toreadbuf[1]);
                     ri->toread = 0;
                     ri->toread_off += len;
@@ -721,11 +740,11 @@ reconnect:
                     // build response with TIMEOUT error message
                     uint8_t errbuf[] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x05, 0x00, 0x00 };
 
-                    DEBUGF("Remove from queue(%d) %p: sid=%d stamp=%ld,exp=%ld %ld\n", VLEN(*qv), q, q->buf[6], q->stamp, q->expire, cur_time);
+                    DEBUGF("Remove from queue(%d) %p: sid=%d stamp=%ld,exp=%ld %ld\n", VLEN(*qv), q, q->buf[0], q->stamp, q->expire, cur_time);
 
                     errbuf[0] = q->tido[0];
                     errbuf[1] = q->tido[1];
-                    errbuf[6] = q->buf[6];
+                    errbuf[6] = q->buf[0];
                     errbuf[7] = q->function | 0x80;
 
                     /* Slave is busy */
@@ -818,12 +837,6 @@ void *tcp_thread(void *p)
     struct workers *self = (struct workers *)p;
     struct epoll_event evs[MAX_EVENTS];
 
-    self->ep = epoll_create(MAX_EVENTS);
-    if (self->ep == -1) {
-        perror("epoll_create() failed");
-        return NULL;
-    }
-
     /* Main loop */
     for (;;) {
 #ifdef _NUTTX_BUILD
@@ -845,54 +858,54 @@ void *tcp_thread(void *p)
 
             if (evs[n].events & EPOLLIN) {
 
-            len = read(evs[n].data.fd, buf, 6);
-            if (len == 0) {
+                len = read(evs[n].data.fd, buf, 6);
+                if (len == 0) {
 //c_close:
-                epoll_ctl(self->ep, EPOLL_CTL_DEL, evs[n].data.fd, NULL);
-                perror("tcp_thread len=0");
-                wbqueue_free(self->cfg, evs[n].data.fd);
-                continue;
-            } else if (len < 0) {
-                perror("Error occured");
-            } else if (len == 6) {
-                int pktlen;
-                int pkt_count = 0;
+                    epoll_ctl(self->ep, EPOLL_CTL_DEL, evs[n].data.fd, NULL);
+                    perror("tcp_thread len=0");
+                    wbqueue_free(self->cfg, evs[n].data.fd);
+                    continue;
+                } else if (len < 0) {
+                    perror("Error occured");
+                } else if (len == 6) {
+                    int pktlen;
+                    int pkt_count = 0;
 
-                dump(buf, len);
+                    dump(buf, len);
 
-                while (1) {
-                    /* Check for MODBUS magic */
-                    if (buf[2] != 0 || buf[3] != 0) {
-                        break;
+                    while (1) {
+                        /* Check for MODBUS magic */
+                        if (buf[2] != 0 || buf[3] != 0) {
+                            break;
+                        }
+
+                        /* Read packet data */
+                        pktlen = buf[5];
+                        DEBUGF("**** pktlen=%d\n", pktlen);
+                        len = read(evs[n].data.fd, buf+6, pktlen);
+                        if (len <= 0) {
+                            if (errno == EAGAIN)
+                                perror("*** data");
+                            break;
+                        }
+
+                        dump(buf, pktlen + 6);
+                        if (len != pktlen) {
+                            DEBUGF("!!! not enough data to read: %d/%d\n", len, pktlen);
+                            break;
+                        }
+                        queue_add(self->cfg, buf[6], evs[n].data.fd, buf, pktlen + 6);
+
+                        /* HACK: Limit each client with N packets */
+                        if (++pkt_count == 20)
+                            break;
+
+                        /* Read next header */
+                        len = read(evs[n].data.fd, buf, 6);
+                        if (len <= 0)
+                            break;
                     }
-
-                    /* Read packet data */
-                    pktlen = buf[5];
-                    DEBUGF("**** pktlen=%d\n", pktlen);
-                    len = read(evs[n].data.fd, buf+6, pktlen);
-                    if (len <= 0) {
-                        if (errno == EAGAIN)
-                            perror("*** data");
-                        break;
-                    }
-
-                    dump(buf, pktlen + 6);
-                    if (len != pktlen) {
-                        DEBUGF("!!! not enough data to read: %d/%d\n", len, pktlen);
-                        break;
-                    }
-                    queue_add(self->cfg, buf[6], evs[n].data.fd, buf, pktlen + 6);
-
-                    /* Limit each client with N packets */
-                    if (++pkt_count == 20)
-                        break;
-
-                    /* Read next header */
-                    len = read(evs[n].data.fd, buf, 6);
-                    if (len <= 0)
-                        break;
                 }
-            }
             }
 
             if (evs[n].events & EPOLLOUT) {
@@ -1075,6 +1088,11 @@ int main(int argc, char *argv[])
 #endif
         workers[n].n = n;
         workers[n].cfg = cfg;
+        workers[n].ep = epoll_create(MAX_EVENTS);
+        if (workers[n].ep == -1) {
+            perror("epoll_create() failed");
+            return 3;
+        }
         if (pthread_create(&workers[n].th, &attr, tcp_thread, &workers[n]) < 0) {
             perror("pthread_create() failed");
             return 2;
@@ -1112,6 +1130,8 @@ int main(int argc, char *argv[])
             c = accept(evs[n].data.fd, (struct sockaddr *)&local, &addrlen);
 
             if (c < 0) {
+                if (errno == ENOTCONN)
+                    continue;
                 perror("accept()");
                 /* HACK: unable to accept more incoming connections */
                 rc = -1;
