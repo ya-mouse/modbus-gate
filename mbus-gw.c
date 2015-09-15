@@ -523,15 +523,6 @@ inline void _queue_remove(struct rtu_desc *rtu, int n)
     if (!rtu)
         return;
 
-    if (rtu->toreadbuf) {
-        DEBUGF("_queue_remove: toreadbuf=%p toread_off=%d toread=%d\n", rtu->toreadbuf, rtu->toread_off, rtu->toread);
-        free(rtu->toreadbuf);
-        DEBUGF("-- ok\n");
-    }
-    rtu->toread = 0;
-    rtu->toread_off = 0;
-    rtu->toreadbuf = NULL;
-
     q = &VGET(rtu->q, n);
     DEBUGF("_queue_remove: q->buf=%p l=%d\n", q->buf, q->len);
     free(q->buf);
@@ -669,6 +660,10 @@ reconnect:
 
             /* Update cache */
             cache_update(ri, ri->toreadbuf, ri->toread_off);
+            free(ri->toreadbuf);
+            ri->toread = 0;
+            ri->toread_off = 0;
+            ri->toreadbuf = NULL;
         }
 
         if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
