@@ -621,7 +621,7 @@ void *rtu_thread(void *arg)
 
             if (ri->toreadbuf == NULL || ri->toread == 0) {
                 uint8_t *buf = malloc(512);
-                len = read(evs[n].data.fd, buf, 512);
+                len = read(ri->fd, buf, 512);
                 if (len <= 0)
                     goto reconnect;
                 printf("Unordered data received #%d\n", ri->fd);
@@ -630,8 +630,8 @@ void *rtu_thread(void *arg)
                 free(buf);
                 continue;
             } else {
-                len = read(evs[n].data.fd, ri->toreadbuf+ri->toread_off, ri->toread);
-                DEBUGF("*** read %p + %d, %d\n", ri->toreadbuf, ri->toread_off, ri->toread);
+                len = read(ri->fd, ri->toreadbuf+ri->toread_off, ri->toread);
+                DEBUGF("*** read %p + %d, %d #%d\n", ri->toreadbuf, ri->toread_off, ri->toread, ri->fd);
             }
             if (len < 0) {
 reconnect:
@@ -643,7 +643,7 @@ reconnect:
                 rtu_open(ri, ep);
                 continue;
             }
-            DEBUGF(">>> Read %d bytes from \e[1;31m#%d\n", len, evs[n].data.fd);
+            DEBUGF(">>> Read %d bytes from \e[1;31m#%d\n", len, ri->fd);
             dump(ri->toreadbuf, ri->toread_off + len);
             DEBUGF("\e[0m");
 
@@ -751,7 +751,7 @@ reconnect:
                     // build response with TIMEOUT error message
                     uint8_t errbuf[] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x05, 0x00, 0x00 };
 
-                    DEBUGF("Remove from queue(%d) %p: sid=%d stamp=%ld,exp=%ld %ld\n", VLEN(*qv), q, q->buf[0], q->stamp, q->expire, cur_time);
+                    DEBUGF("Remove from queue(%d) #%d %p: sid=%d stamp=%ld,exp=%ld %ld\n", VLEN(*qv), ri->fd, q, q->buf[0], q->stamp, q->expire, cur_time);
 
                     errbuf[0] = q->tido[0];
                     errbuf[1] = q->tido[1];
@@ -765,6 +765,14 @@ reconnect:
                     /* Update cache with fective CRC */
                     _cache_update(ri, q, errbuf + 6, 5);
 
+                    /* Reset `toread' buffer on query timeout */
+                    if (q->stamp && ri->toreadbuf) {
+                        free(ri->toreadbuf);
+                        ri->toread = 0;
+                        ri->toread_off = 0;
+                        ri->toreadbuf = NULL;
+                    }
+
                     if (q->resp_fd >= 0) {
                         _wbqueue_add(cfg, q->resp_fd, errbuf, sizeof(errbuf) - 2);
                     }
@@ -773,6 +781,7 @@ reconnect:
                     continue;
                 } else if (q->stamp) {
                     /* Query is not completed yet, check other */
+//                    DEBUGF("+++ requested #%d: stamp=%ld\n", ri->fd, q->stamp);
                     continue;
                 } else if (ri->toread > 0) {
 //                    DEBUGF("+++ request pending #%d: %d\n", ri->fd, ri->toread);
