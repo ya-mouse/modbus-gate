@@ -356,6 +356,8 @@ int queue_add(struct cfg *cfg,
     struct slave_map *mi;
     struct rtu_desc *ri;
     struct queue_list q;
+    struct queue_list *qp;
+    int already_in_queue = 0;
     int rc;
 
     if ((rc = pthread_rwlock_wrlock(&rwlock)) != 0) {
@@ -375,9 +377,16 @@ int queue_add(struct cfg *cfg,
     return -2;
 
 found:
+    VFOREACH(ri->q, qp) {
+        if (qp->src == mi->src && qp->len == len-4 && !memcmp(qp->buf+1, buf+7, len-7)) {
+            already_in_queue = 1;
+            break;
+        }
+    }
+
     DEBUGF("Adding sid=%d to queue (%d@%d) len=%d fn=%d fd=#%d\n", slave_id, VLEN(ri->q), ri->fd, len, buf[7], fd);
 
-    if (VLEN(ri->q) >= 150) {
+    if (VLEN(ri->q) >= 400 || already_in_queue) {
         // build response with TIMEOUT error message
         uint8_t errbuf[] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x05 };
 
@@ -386,11 +395,17 @@ found:
         errbuf[6] = buf[6];
         errbuf[7] = buf[7] | 0x80;
 
-        /* Slave is busy */
-        errbuf[8] = 0x06;
+        if (already_in_queue) {
+            /* Query already in queue */
+            errbuf[8] = 0x05;
+            DEBUGF("...already in queue\n");
+        } else {
+            /* Slave is busy */
+            errbuf[8] = 0x06;
+            DEBUGF("...queue limit reached\n");
+        }
 
         _wbqueue_add(cfg, fd, errbuf, sizeof(errbuf));
-        DEBUGF("...queue limit reached\n");
         goto unlock;
     }
 
@@ -407,16 +422,16 @@ found:
     DEBUGF("\e[0m=== added === %d\n", fd);
     if (ri->type == RTU) {
         uint16_t crc;
-        q.buf = calloc(1, len-4);
-        DEBUGF("! q.buf=%p (%d)\n", q.buf, len-4);
         q.len = len-4;
+        q.buf = calloc(1, q.len);
+        DEBUGF("! q.buf=%p (%d)\n", q.buf, q.len);
         q.tido[0] = buf[0];
         q.tido[1] = buf[1];
         q.function = buf[7];
         memcpy(q.buf, buf+6, len-6);
         q.buf[0] = mi->dst;
         q.src = mi->src;
-        crc = crc16(q.buf, len-6);
+        crc = crc16(q.buf, q.len-2);
         memcpy(q.buf+q.len-2, &crc, 2);
         dump(q.buf, q.len);
     } else {
@@ -628,8 +643,9 @@ reconnect:
                 rtu_open(ri, ep);
                 continue;
             }
-            DEBUGF(">>> Read %d bytes from #%d\n", len, evs[n].data.fd);
+            DEBUGF(">>> Read %d bytes from \e[1;31m#%d\n", len, evs[n].data.fd);
             dump(ri->toreadbuf, ri->toread_off + len);
+            DEBUGF("\e[0m");
 
 #ifndef _NUTTX_BUILD
             /* Process RealCOM command */
@@ -759,7 +775,7 @@ reconnect:
                     /* Query is not completed yet, check other */
                     continue;
                 } else if (ri->toread > 0) {
-                    DEBUGF("+++ request pending #%d: %d\n", ri->fd, ri->toread);
+//                    DEBUGF("+++ request pending #%d: %d\n", ri->fd, ri->toread);
                     continue;
                 }
 
