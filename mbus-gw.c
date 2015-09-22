@@ -386,7 +386,7 @@ found:
 
     DEBUGF("Adding sid=%d to queue (%d@%d) len=%d fn=%d fd=#%d\n", slave_id, VLEN(ri->q), ri->fd, len, buf[7], fd);
 
-    if (VLEN(ri->q) >= 400 || already_in_queue) {
+    if (VLEN(ri->q) >= 150 || already_in_queue) {
         // build response with TIMEOUT error message
         uint8_t errbuf[] = { 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x05 };
 
