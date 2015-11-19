@@ -816,7 +816,9 @@ reconnect:
                             write(ri->fd, q->buf, q->len);
                             // status register
                             if (q->buf[1] == 1) {
-                                ri->toread = ((q->buf[4] << 8) | q->buf[5]) + 5;
+                                int numregs;
+                                numregs = (q->buf[4] << 8) | q->buf[5];
+                                ri->toread = (numregs >> 3) + (numregs % 8 > 0 ? 1 : 0) + 5;
                             } else if (q->buf[1] == 2) {
                                 ri->toread = 6;
                             } else {
